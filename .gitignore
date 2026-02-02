@@ -1,0 +1,15 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# FastF1 cache
+cache/
+
+# macOS
+.DS_Store
+
+# Personal notes
+roadmap.pages
+
+
