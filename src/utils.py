@@ -8,4 +8,3 @@ def plot_sample_path(telemetry):
     plt.ylabel("Y")
     plt.axis("equal")
     plt.show()
-
