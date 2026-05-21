@@ -837,7 +837,7 @@ def _status_label(code):
 # ---------------------------------------------------------------------------
 # Weather panel
 # ---------------------------------------------------------------------------
-def draw_weather_panel(screen, weather_timeline, t):
+def draw_weather_panel(screen, weather_timeline, t, focused_driver=None):
     """Small translucent weather overlay in the top-left area."""
     if not weather_timeline:
         return
@@ -849,7 +849,8 @@ def draw_weather_panel(screen, weather_timeline, t):
         else:
             break
     panel_w, panel_h = 195, 140
-    px, py = 18, HEADER_HEIGHT + 14
+    py_offset = 165 if focused_driver else 0
+    px, py = 18, HEADER_HEIGHT + 14 + py_offset
     bg = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
     bg.fill((16, 18, 24, 210))
     screen.blit(bg, (px, py))
@@ -874,7 +875,7 @@ def draw_weather_panel(screen, weather_timeline, t):
 # ---------------------------------------------------------------------------
 # Race control feed (scrolling)
 # ---------------------------------------------------------------------------
-def draw_race_control_feed(screen, rc_messages, t, screen_w, show_feed):
+def draw_race_control_feed(screen, rc_messages, t, screen_w, show_feed, show_similarity=False):
     """Draw recent race control messages as a scrolling feed."""
     if not show_feed or not rc_messages:
         return
@@ -883,7 +884,8 @@ def draw_race_control_feed(screen, rc_messages, t, screen_w, show_feed):
         return
     panel_w = 340
     panel_h = 20 + len(recent) * 18
-    px = screen_w - SIDEBAR_WIDTH - panel_w - 15
+    offset_w = 400 if show_similarity else SIDEBAR_WIDTH
+    px = screen_w - offset_w - panel_w - 15
     py = HEADER_HEIGHT + 14
     bg = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
     bg.fill((16, 18, 24, 210))
@@ -1541,8 +1543,8 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
 
         # --- New Tier-1 overlays ---
         draw_status_banner(screen, _cur_status, screen_w)
-        draw_weather_panel(screen, weather_timeline, time_val)
-        draw_race_control_feed(screen, rc_messages, time_val, screen_w, show_rc_feed)
+        draw_weather_panel(screen, weather_timeline, time_val, focused_driver)
+        draw_race_control_feed(screen, rc_messages, time_val, screen_w, show_rc_feed, show_similarity)
         draw_session_info(screen, session_info, screen_w)
         ctrl_buttons = draw_race_controls(screen, paused, speed, screen_w)
 
