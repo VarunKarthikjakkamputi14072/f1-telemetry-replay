@@ -1125,7 +1125,7 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
 
     # Pre-compute spatial grid for O(1) label normal lookups
     _normal_grid = {}
-    if _track_normals and len(_track_normals) > 0 and len(_center_pts) > 0:
+    if _track_normals is not None and len(_track_normals) > 0 and len(_center_pts) > 0:
         for _ni, pt in enumerate(_center_pts):
             gx, gy = int(pt[0] / 20), int(pt[1] / 20)
             for dx in (-1, 0, 1):
