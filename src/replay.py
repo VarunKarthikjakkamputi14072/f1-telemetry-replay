@@ -9,6 +9,7 @@ def get_font(name, size, bold=False):
 import sys
 import numpy as np
 import math
+from collections import deque
 from track_geo import (compute_circuit_rotation, compute_track_normals,
                        build_track_edges, rotate_point, label_offset_from_normal)
 from tyre_model import compound_color as tyre_compound_color
@@ -34,6 +35,7 @@ SECTOR_FLASH_COLORS = {
 }
 TRAIL_LENGTH = 28
 SIDEBAR_WIDTH = 260
+_tyre_model_global = None
 HEADER_HEIGHT = 76
 SEEK_BAR_HEIGHT = 20
 
@@ -472,7 +474,7 @@ def draw_delta_panel(screen, focused_driver, ghost_driver, driver_info, frame_by
 
     chart = pygame.Rect(rect.x + 10, rect.y + 58, rect.w - 20, 34)
     pygame.draw.line(screen, (70, 74, 86), (chart.x, chart.centery), (chart.right, chart.centery), 1)
-    visible = delta_history[-80:]
+    visible = list(delta_history)[-80:]
     max_abs = max(0.1, max(abs(value) for value in visible))
     points = []
     for idx, value in enumerate(visible):
@@ -634,8 +636,8 @@ def draw_dashboard(
         dot_x = panel_x + 94
         # Tyre health ring with degradation model
         _health_pct = 100
-        if hasattr(draw_dashboard, '_tyre_model') and draw_dashboard._tyre_model and draw_dashboard._tyre_model.fitted:
-            _h = draw_dashboard._tyre_model.get_health(compound, int(tyre_life))
+        if _tyre_model_global and _tyre_model_global.fitted:
+            _h = _tyre_model_global.get_health(compound, int(tyre_life))
             _health_pct = _h["health"]
         else:
             _health_pct = max(0, int(100 - tyre_life * 2.5))
@@ -1137,13 +1139,14 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
     paused = False
     speed = 1.0
     show_heatmap = False
-    draw_dashboard._tyre_model = tyre_model
+    global _tyre_model_global
+    _tyre_model_global = tyre_model
     gap_mode = "gap"
     focused_driver = None
     ghost_driver = None
     show_similarity = False
     sidebar_rects = {}
-    delta_history = []
+    delta_history = deque(maxlen=240)
 
     drv_colors = {drv: parse_team_color(info["TeamColor"]) for drv, info in driver_info.items()}
     trails = {drv: [] for drv in drivers_data}
@@ -1220,15 +1223,15 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
                 if event.key == pygame.K_f:
                     focused_driver = None
                     ghost_driver = None
-                    delta_history = []
+                    delta_history.clear()
                 if event.key == pygame.K_c:
                     ghost_driver = None
-                    delta_history = []
+                    delta_history.clear()
                 if event.key == pygame.K_r:
                     time_val = timeline[0]
                     trails = {drv: [] for drv in drivers_data}
                     row_positions = {}
-                    delta_history = []
+                    delta_history.clear()
                     previous_order = []
                     active_overtakes = []
                     ot_cooldowns = {}
@@ -1239,7 +1242,7 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
                     ratio = mx / screen_w
                     time_val = ratio * total_time
                     trails = {drv: [] for drv in drivers_data}
-                    delta_history = []
+                    delta_history.clear()
                     previous_order = []
                     active_overtakes = []
                     ot_cooldowns = {}
@@ -1257,7 +1260,7 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
             if time_val > total_time:
                 time_val = timeline[0]
                 trails = {drv: [] for drv in drivers_data}
-                delta_history = []
+                delta_history.clear()
                 previous_order = []
                 active_overtakes = []
                 ot_cooldowns = {}
@@ -1396,17 +1399,17 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
                             focused_driver = clicked_driver
                         elif clicked_driver != focused_driver:
                             ghost_driver = None if ghost_driver == clicked_driver else clicked_driver
-                            delta_history = []
+                            delta_history.clear()
                     else:
                         if focused_driver == clicked_driver:
                             focused_driver = None
                             ghost_driver = None
-                            delta_history = []
+                            delta_history.clear()
                         else:
                             focused_driver = clicked_driver
                             if ghost_driver == clicked_driver:
                                 ghost_driver = None
-                            delta_history = []
+                            delta_history.clear()
 
                     camera = build_camera(focused_driver, frame_by_driver, screen_size)
                     for frame_state in current_frame_data:
@@ -1415,8 +1418,6 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
             if focused_driver and ghost_driver and focused_driver in frame_by_driver and ghost_driver in frame_by_driver:
                 delta = (frame_by_driver[ghost_driver]["dist"] - frame_by_driver[focused_driver]["dist"]) / 70.0
                 delta_history.append(delta)
-                if len(delta_history) > 240:
-                    delta_history.pop(0)
 
             if ghost_driver in trails:
                 draw_ghost_trail(screen, trails[ghost_driver], drv_colors.get(ghost_driver, (220, 220, 220)), camera)
