@@ -6,6 +6,80 @@ import sys
 # Suppress technical warnings for a cleaner console
 warnings.filterwarnings("ignore", category=FutureWarning)
 
+def seconds_from_timedelta(value):
+    if value is None or pd.isna(value):
+        return None
+    if hasattr(value, "total_seconds"):
+        return value.total_seconds()
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def compute_overall_sector_bests(laps):
+    sector_bests = {}
+    for sector in (1, 2, 3):
+        col = f"Sector{sector}Time"
+        if col not in laps.columns:
+            continue
+
+        best = None
+        for value in laps[col].dropna():
+            seconds = seconds_from_timedelta(value)
+            if seconds is not None and (best is None or seconds < best):
+                best = seconds
+
+        if best is not None:
+            sector_bests[sector] = best
+
+    return sector_bests
+
+
+def build_sector_events(laps, overall_sector_bests):
+    events = []
+    personal_bests = {}
+
+    for _, lap in laps.sort_values(by="LapNumber").iterrows():
+        lap_number = int(lap["LapNumber"]) if not pd.isna(lap.get("LapNumber")) else 0
+
+        for sector in (1, 2, 3):
+            sector_col = f"Sector{sector}Time"
+            session_col = f"Sector{sector}SessionTime"
+            if sector_col not in laps.columns or session_col not in laps.columns:
+                continue
+
+            sector_seconds = seconds_from_timedelta(lap.get(sector_col))
+            event_time = seconds_from_timedelta(lap.get(session_col))
+            if sector_seconds is None or event_time is None:
+                continue
+
+            previous_personal = personal_bests.get(sector)
+            is_personal_best = previous_personal is None or sector_seconds < previous_personal
+            if is_personal_best:
+                personal_bests[sector] = sector_seconds
+
+            overall_best = overall_sector_bests.get(sector)
+            is_overall_best = overall_best is not None and abs(sector_seconds - overall_best) < 0.001
+
+            if is_overall_best:
+                event_type = "overall_best"
+            elif is_personal_best:
+                event_type = "personal_best"
+            else:
+                event_type = "normal"
+
+            events.append({
+                "time": event_time,
+                "sector": sector,
+                "sector_time": sector_seconds,
+                "lap_number": lap_number,
+                "type": event_type
+            })
+
+    return sorted(events, key=lambda event: event["time"])
+
+
 def load_race(year: int, race_name: str):
     """
     Loads F1 telemetry data for a specific year and race.
@@ -31,6 +105,7 @@ def load_race(year: int, race_name: str):
     print("⚙️ Processing driver telemetry...")
     drivers_data = {}
     driver_info = {}
+    overall_sector_bests = compute_overall_sector_bests(session.laps)
 
     # Calculate official total laps
     try:
@@ -64,12 +139,15 @@ def load_race(year: int, race_name: str):
                     best_lap_time = best_lap["LapTime"].total_seconds()
                     best_lap_number = int(best_lap["LapNumber"])
 
+            sector_events = build_sector_events(laps, overall_sector_bests)
+
             driver_info[driver] = {
                 "Abbreviation": drv_details["Abbreviation"],
                 "TeamColor": f"#{color}",
                 "TeamName": drv_details["TeamName"],
                 "BestLapTime": best_lap_time,
-                "BestLapNumber": best_lap_number
+                "BestLapNumber": best_lap_number,
+                "SectorEvents": sector_events
             }
 
             # Extract Telemetry

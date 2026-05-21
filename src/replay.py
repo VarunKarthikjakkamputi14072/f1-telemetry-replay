@@ -15,6 +15,13 @@ ACCENT_BLUE = (100, 200, 255)
 DRS_GREEN = (90, 255, 120)
 PIT_YELLOW = (255, 205, 80)
 FASTEST_PURPLE = (190, 90, 255)
+SECTOR_GREEN = (80, 255, 120)
+SECTOR_FLASH_DURATION = 1.5
+SECTOR_FLASH_COLORS = {
+    "overall_best": FASTEST_PURPLE,
+    "personal_best": SECTOR_GREEN,
+    "normal": PIT_YELLOW
+}
 TRAIL_LENGTH = 28
 SIDEBAR_WIDTH = 260
 HEADER_HEIGHT = 76
@@ -68,7 +75,34 @@ def speed_to_color(speed, max_speed):
 
 
 def trail_width(speed, max_speed):
-    return max(1, int(1 + 5 * clamp(speed / max(max_speed, 1.0), 0.0, 1.0)))
+    ratio = clamp(speed / max(max_speed, 1.0), 0.0, 1.0)
+    return max(1, int(round(lerp(1, 5, ratio))))
+
+
+def get_sector_flash(info, t):
+    active_event = None
+    for event in info.get("SectorEvents", []):
+        age = t - event.get("time", -9999)
+        if 0 <= age <= SECTOR_FLASH_DURATION:
+            if active_event is None or event["time"] > active_event["time"]:
+                active_event = event
+
+    if not active_event:
+        return None
+
+    event_type = active_event.get("type", "normal")
+    label = {
+        "overall_best": "BEST",
+        "personal_best": "PB",
+        "normal": "SEC"
+    }.get(event_type, "SEC")
+
+    return {
+        "color": SECTOR_FLASH_COLORS.get(event_type, PIT_YELLOW),
+        "label": f"S{active_event.get('sector', '')} {label}",
+        "type": event_type,
+        "age": t - active_event["time"]
+    }
 
 
 def is_drs_active(value):
@@ -542,6 +576,7 @@ def run_replay(drivers_data, bounds, timeline, metadata):
 
             state = get_interpolated_state(df, time_val)
             sx, sy = scale_point(state["X"], state["Y"], bounds, screen_size)
+            sector_flash = get_sector_flash(driver_info.get(drv_code, {}), time_val)
             drs_active = is_drs_active(state["DRS"])
             in_pit = state["Speed"] < 5 and time_val > timeline[0] + 2
 
@@ -562,6 +597,7 @@ def run_replay(drivers_data, bounds, timeline, metadata):
                 "drs": state["DRS"],
                 "drs_active": drs_active,
                 "in_pit": in_pit,
+                "sector_flash": sector_flash,
             }
             current_frame_data.append(frame_state)
             frame_by_driver[drv_code] = frame_state
@@ -649,6 +685,13 @@ def run_replay(drivers_data, bounds, timeline, metadata):
                 if drv_id == focused_driver:
                     pygame.draw.circle(screen, ACCENT_BLUE, (sx, sy), 14, width=2)
 
+                sector_flash = d.get("sector_flash")
+                if sector_flash:
+                    pulse = 0.5 + 0.5 * math.sin(time_val * 18)
+                    sector_color = lerp_color(c, sector_flash["color"], 0.65 + 0.35 * pulse)
+                    pygame.draw.circle(screen, sector_color, (sx, sy), radius + 8, width=3)
+                    c = sector_color
+
                 if d["in_pit"]:
                     flash = 0.5 + 0.5 * math.sin(time_val * 7)
                     pit_color = lerp_color((120, 80, 10), PIT_YELLOW, flash)
@@ -668,6 +711,10 @@ def run_replay(drivers_data, bounds, timeline, metadata):
                     badge_y += 16
                 if d["in_pit"]:
                     draw_badge(screen, "PIT", badge_font, sx + 12, badge_y, (30, 20, 0), PIT_YELLOW)
+                    badge_y += 16
+                if d.get("sector_flash"):
+                    flash_info = d["sector_flash"]
+                    draw_badge(screen, flash_info["label"], badge_font, sx + 12, badge_y, (20, 20, 25), flash_info["color"])
 
             pit_drivers = {d["id"] for d in current_frame_data if d["in_pit"]}
             drs_drivers = {d["id"] for d in current_frame_data if d["drs_active"]}
