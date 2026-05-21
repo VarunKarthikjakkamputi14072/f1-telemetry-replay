@@ -106,7 +106,14 @@ def adaptive_dropout_threshold(dists: np.ndarray) -> float:
 def compute_lateral_g(df: pd.DataFrame) -> pd.Series:
     if "Time" not in df.columns or "X" not in df.columns or "Y" not in df.columns:
         return pd.Series(0, index=df.index)
-    dt = df["Time"].diff().dt.total_seconds().replace(0, np.nan)
+    
+    t = df["Time"]
+    dt_raw = t.diff()
+    if hasattr(dt_raw, "dt"):
+        dt = dt_raw.dt.total_seconds().replace(0, np.nan)
+    else:
+        dt = dt_raw.replace(0, np.nan)
+        
     vx = df["X"].diff() / dt
     vy = df["Y"].diff() / dt
     ax = vx.diff() / dt
@@ -375,10 +382,11 @@ def load_race(year: int, race_name: str):
             telemetry["X"] = telemetry["X"] / 10.0
             telemetry["Y"] = telemetry["Y"] / 10.0
             
-            telemetry["LateralG"] = compute_lateral_g(telemetry)
-
             # Normalize Time
             telemetry["Time"] = telemetry["Time"].dt.total_seconds()
+
+            telemetry["LateralG"] = compute_lateral_g(telemetry)
+
             telemetry.reset_index(drop=True, inplace=True)
 
             drivers_data[driver] = telemetry
