@@ -1119,6 +1119,15 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
     from track_geo import build_track_edges as _bte, label_offset_from_normal
     _inner_edge, _outer_edge, _track_normals = _bte(_center_pts, track_half_width=7) if len(_center_pts) > 2 else ([], [], [])
 
+    # Pre-compute spatial grid for O(1) label normal lookups
+    _normal_grid = {}
+    if _track_normals and len(_track_normals) > 0 and len(_center_pts) > 0:
+        for _ni, pt in enumerate(_center_pts):
+            gx, gy = int(pt[0] / 20), int(pt[1] / 20)
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    _normal_grid[(gx + dx, gy + dy)] = _ni
+
     time_val = timeline[0]
     total_time = timeline[-1]
 
@@ -1469,18 +1478,11 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
                 lbl = tag_font.render(driver_info[drv_id]["Abbreviation"], True, label_color)
                 # Position label using track normals when available
                 _lbl_dx, _lbl_dy = 12, -12
-                if _track_normals is not None and len(_track_normals) > 0 and len(_center_pts) > 0:
-                    _best_ni = 0
-                    _best_dist2 = float('inf')
+                if _track_normals is not None and len(_track_normals) > 0:
                     gx, gy = d.get("gx", sx), d.get("gy", sy)
-                    for _ni in range(0, len(_center_pts), max(1, len(_center_pts) // 60)):
-                        _ddx = _center_pts[_ni][0] - gx
-                        _ddy = _center_pts[_ni][1] - gy
-                        _d2 = _ddx * _ddx + _ddy * _ddy
-                        if _d2 < _best_dist2:
-                            _best_dist2 = _d2
-                            _best_ni = _ni
-                    if _best_ni < len(_track_normals):
+                    cell = (int(gx / 20), int(gy / 20))
+                    _best_ni = _normal_grid.get(cell)
+                    if _best_ni is not None and _best_ni < len(_track_normals):
                         _lbl_dx, _lbl_dy = label_offset_from_normal(_track_normals[_best_ni], 30)
                 screen.blit(lbl, (sx + _lbl_dx, sy + _lbl_dy))
 
