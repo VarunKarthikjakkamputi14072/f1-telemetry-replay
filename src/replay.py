@@ -30,6 +30,17 @@ SIDEBAR_WIDTH = 260
 HEADER_HEIGHT = 76
 SEEK_BAR_HEIGHT = 20
 
+_COMPOUND_COLORS = {
+    "SOFT": (220, 40, 40), "MEDIUM": (220, 190, 30),
+    "HARD": (240, 240, 240), "INTERMEDIATE": (60, 180, 60), "WET": (60, 100, 220),
+    "HYPERSOFT": (255, 105, 180), "ULTRASOFT": (138, 43, 226), "SUPERSOFT": (255, 69, 0),
+    "UNKNOWN": (150, 150, 150), "nan": (150, 150, 150)
+}
+
+def tyre_compound_color(name):
+    return _COMPOUND_COLORS.get(str(name).upper().strip(), (150, 150, 150))
+
+
 
 def clamp(value, low, high):
     return max(low, min(value, high))
@@ -598,12 +609,6 @@ def draw_dashboard(
         name_surf = name_font.render(info["Abbreviation"], True, text_col)
         screen.blit(name_surf, (panel_x + 50, y_pos + 8))
 
-        COMPOUND_COLORS = {
-            "SOFT": (220, 40, 40), "MEDIUM": (220, 190, 30),
-            "HARD": (240, 240, 240), "INTERMEDIATE": (60, 180, 60), "WET": (60, 100, 220),
-            "HYPERSOFT": (255, 105, 180), "ULTRASOFT": (138, 43, 226), "SUPERSOFT": (255, 69, 0),
-            "UNKNOWN": (150, 150, 150), "nan": (150, 150, 150)
-        }
         drv_lap = int(frame_by_driver[drv_id]["lap"])
         lap_stints = info.get("LapStints", {})
         
