@@ -216,13 +216,23 @@ def load_race(year: int, race_name: str):
 
             lap_stints = {}
             if "Compound" in laps.columns and "TyreLife" in laps.columns:
+                prev_compound = None
+                stint_start_lap = 1
                 for _, lap_row in laps.iterrows():
                     lap_num = int(lap_row.get("LapNumber", 0)) if not pd.isna(lap_row.get("LapNumber")) else 0
                     if not pd.isna(lap_row.get("Compound")):
+                        compound = str(lap_row["Compound"])
+                        tyre_life_val = float(lap_row.get("TyreLife", 0))
+                        
+                        if tyre_life_val == 1 or prev_compound != compound:
+                            stint_start_lap = lap_num
+                            
                         lap_stints[lap_num] = {
-                            "Compound": str(lap_row["Compound"]),
-                            "TyreLife": float(lap_row.get("TyreLife", 0))
+                            "Compound": compound,
+                            "TyreLife": tyre_life_val,
+                            "StintStartLap": stint_start_lap
                         }
+                        prev_compound = compound
 
             driver_info[driver] = {
                 "Abbreviation": drv_details["Abbreviation"],

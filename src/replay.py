@@ -594,31 +594,34 @@ def draw_dashboard(
         name_surf = name_font.render(info["Abbreviation"], True, text_col)
         screen.blit(name_surf, (panel_x + 50, y_pos + 8))
 
-        badge_x = panel_x + 94
-        
         COMPOUND_COLORS = {
             "SOFT": (220, 40, 40), "MEDIUM": (220, 190, 30),
-            "HARD": (240, 240, 240), "INTERMEDIATE": (60, 180, 60), "WET": (60, 100, 220)
+            "HARD": (240, 240, 240), "INTERMEDIATE": (60, 180, 60), "WET": (60, 100, 220),
+            "HYPERSOFT": (255, 105, 180), "ULTRASOFT": (138, 43, 226), "SUPERSOFT": (255, 69, 0),
+            "UNKNOWN": (150, 150, 150), "nan": (150, 150, 150)
         }
         drv_lap = int(frame_by_driver[drv_id]["lap"])
         lap_stints = info.get("LapStints", {})
         
-        # Try to find exactly this lap, or fallback to the latest known stint if missing
         stint = lap_stints.get(drv_lap)
-        if not stint:
-            # Fallback for laps before the first recorded stint, or if missing
-            past_stints = [k for k in lap_stints.keys() if k <= drv_lap]
-            stint_key = max(past_stints) if past_stints else (min(lap_stints.keys()) if lap_stints else 0)
-            stint = lap_stints.get(stint_key, {})
+        if not stint and lap_stints:
+            past = [k for k in lap_stints if k <= drv_lap]
+            key = max(past) if past else min(lap_stints)
+            stint = lap_stints[key]
+        elif not stint:
+            stint = {}
             
-        compound = stint.get("Compound", "HARD")
-        tyre_life = int(stint.get("TyreLife", 0))
+        compound = str(stint.get("Compound", "HARD")).upper()
+        stint_start = stint.get("StintStartLap", drv_lap)
+        tyre_life = max(1, drv_lap - stint_start + 1) if lap_stints else int(stint.get("TyreLife", 0))
         
-        dot_x = panel_x + 130
-        pygame.draw.circle(screen, COMPOUND_COLORS.get(compound, (240, 240, 240)), (dot_x, y_pos + 15), 5)
+        dot_x = panel_x + 94
+        pygame.draw.circle(screen, COMPOUND_COLORS.get(compound, (150, 150, 150)), (dot_x, y_pos + 15), 5)
         val_font = pygame.font.SysFont("Consolas", 11, bold=True)
         life_surf = val_font.render(f"{tyre_life}L", True, SUBTEXT_COLOR)
         screen.blit(life_surf, (dot_x + 10, y_pos + 10))
+        
+        badge_x = dot_x + 36
         
         if ot_attacker:
             tri_x = badge_x + 6
