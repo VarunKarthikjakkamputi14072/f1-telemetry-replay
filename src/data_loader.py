@@ -5,9 +5,86 @@ import sys
 import numpy as np
 
 from similarity import build_driver_fingerprint
+from tyre_model import TyreDegradationModel
 
-# Suppress technical warnings for a cleaner console
 warnings.filterwarnings("ignore", category=FutureWarning)
+
+
+def extract_track_statuses(session):
+    """Parse session track status into a timeline of status periods."""
+    statuses = []
+    try:
+        ts_df = session.track_status
+        if ts_df is None or ts_df.empty:
+            return statuses
+        for _, row in ts_df.iterrows():
+            t = seconds_from_timedelta(row.get("Time"))
+            status_code = str(row.get("Status", "1"))
+            msg = str(row.get("Message", ""))
+            if t is not None:
+                statuses.append({"time": t, "status": status_code, "message": msg})
+    except Exception:
+        pass
+    statuses.sort(key=lambda s: s["time"])
+    return statuses
+
+
+def extract_race_control_messages(session):
+    """Parse race control messages (flags, penalties, SC, DRS)."""
+    messages = []
+    try:
+        rc = getattr(session, "race_control_messages", None)
+        if rc is None or rc.empty:
+            return messages
+        for _, row in rc.iterrows():
+            t = seconds_from_timedelta(row.get("Time"))
+            if t is None:
+                continue
+            messages.append({
+                "time": t,
+                "category": str(row.get("Category", "")),
+                "message": str(row.get("Message", "")),
+                "flag": str(row.get("Flag", "")),
+                "scope": str(row.get("Scope", "")),
+                "sector": str(row.get("Sector", "")),
+                "driver": str(row.get("RacingNumber", "")),
+            })
+    except Exception:
+        pass
+    messages.sort(key=lambda m: m["time"])
+    return messages
+
+
+def extract_weather_timeline(session, global_timeline):
+    """Resample weather data onto the replay timeline."""
+    weather = []
+    try:
+        wdf = getattr(session, "weather_data", None)
+        if wdf is None or wdf.empty:
+            return weather
+        w_times = wdf["Time"].dt.total_seconds().values
+        if len(w_times) < 2:
+            return weather
+        order = np.argsort(w_times)
+        w_times = w_times[order]
+        cols = {}
+        for col in ["AirTemp", "TrackTemp", "Humidity", "Pressure",
+                     "WindSpeed", "WindDirection", "Rainfall"]:
+            if col in wdf.columns:
+                vals = pd.to_numeric(wdf[col], errors="coerce").fillna(0).values[order]
+                cols[col] = vals
+        tl = np.array(global_timeline)
+        resampled = {}
+        for col, vals in cols.items():
+            resampled[col] = np.interp(tl, w_times, vals)
+        for i, t in enumerate(tl):
+            entry = {"time": float(t)}
+            for col in resampled:
+                entry[col] = float(resampled[col][i])
+            weather.append(entry)
+    except Exception as e:
+        print(f"Warning: Weather data processing failed: {e}")
+    return weather
 
 def seconds_from_timedelta(value):
     if value is None or pd.isna(value):
@@ -168,7 +245,7 @@ def load_race(year: int, race_name: str):
 
     print("📥 Downloading telemetry data (this may take a minute)...")
     try:
-        session.load(telemetry=True, laps=True, weather=False)
+        session.load(telemetry=True, laps=True, weather=True)
     except Exception as e:
         print(f"❌ Error downloading data: {e}")
         sys.exit(1)
@@ -341,6 +418,33 @@ def load_race(year: int, race_name: str):
             fastest_driver = driver
             fastest_lap_time = lap_time
 
+    # --- TRACK STATUS, RACE CONTROL, WEATHER ---
+    print("Extracting track status & race control data...")
+    track_statuses = extract_track_statuses(session)
+    rc_messages = extract_race_control_messages(session)
+    weather_timeline = extract_weather_timeline(session, timeline)
+
+    # --- TYRE DEGRADATION MODEL ---
+    tyre_deg_model = TyreDegradationModel()
+    try:
+        if session.laps is not None and not session.laps.empty:
+            tyre_deg_model.fit(session.laps)
+            if tyre_deg_model.fitted:
+                print("Tyre degradation model fitted successfully")
+                for cname, prof in tyre_deg_model.profiles.items():
+                    print(f"  {cname}: {prof['deg']:.4f} s/lap, max stint ~{prof['max_stint']} laps")
+    except Exception as e:
+        print(f"Tyre model fitting skipped: {e}")
+
+    # --- SESSION INFO ---
+    session_info = {
+        "event_name": session.event.get("EventName", ""),
+        "circuit": session.event.get("Location", ""),
+        "country": session.event.get("Country", ""),
+        "date": str(session.event.get("EventDate", "")),
+        "round": session.event.get("RoundNumber", ""),
+    }
+
     return {
         "drivers": drivers_data,
         "track": {
@@ -348,6 +452,10 @@ def load_race(year: int, race_name: str):
             "timeline": timeline
         },
         "similarity": similarity_matrix,
+        "track_statuses": track_statuses,
+        "race_control": rc_messages,
+        "weather": weather_timeline,
+        "tyre_model": tyre_deg_model,
         "metadata": {
             "year": year,
             "race_name": session.event["EventName"],
@@ -355,7 +463,8 @@ def load_race(year: int, race_name: str):
             "total_laps": total_laps,
             "driver_info": driver_info,
             "fastest_driver": fastest_driver,
-            "fastest_lap_time": fastest_lap_time
+            "fastest_lap_time": fastest_lap_time,
+            "session_info": session_info,
         }
     }
 

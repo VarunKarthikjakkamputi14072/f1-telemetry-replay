@@ -2,6 +2,9 @@ import pygame
 import sys
 import numpy as np
 import math
+from track_geo import (compute_circuit_rotation, compute_track_normals,
+                       build_track_edges, rotate_point, label_offset_from_normal)
+from tyre_model import compound_color as tyre_compound_color
 
 # --- Visual Configuration ---
 BG_COLOR = (13, 13, 17)
@@ -285,7 +288,7 @@ def get_interpolated_state(df, t):
     return state
 
 
-def draw_track(screen, track_segments, show_heatmap, max_speed, camera=None):
+def draw_track(screen, track_segments, show_heatmap, max_speed, camera=None, status_color=None):
     if not track_segments:
         return
 
@@ -308,7 +311,8 @@ def draw_track(screen, track_segments, show_heatmap, max_speed, camera=None):
                 7
             )
     elif len(points) > 1:
-        pygame.draw.lines(screen, TRACK_COLOR, False, points, 7)
+        track_col = status_color if status_color else TRACK_COLOR
+        pygame.draw.lines(screen, track_col, False, points, 7)
 
     overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
     for segment in track_segments:
@@ -521,7 +525,7 @@ def draw_dashboard(
         screen.blit(font_small.render(fl_text, True, FASTEST_PURPLE), (22, 58))
 
     # 5. Help Text (Bottom Right)
-    help_text = "[Click] Focus  [Shift+Click] Ghost  [C] Clear Ghost  [H] Heatmap  [G] Gap Mode  [F] Clear All"
+    help_text = "[Click] Focus  [Shift+Click] Ghost  [H] Heatmap  [G] Gap  [M] RaceCtrl  [F] Clear"
     help_surf = font_small.render(help_text, True, (100, 100, 110))
     help_rect = help_surf.get_rect(right=screen_w - SIDEBAR_WIDTH - 22, top=58)
     screen.blit(help_surf, help_rect)
@@ -616,10 +620,17 @@ def draw_dashboard(
         tyre_life = max(1, drv_lap - stint_start + 1) if lap_stints else int(stint.get("TyreLife", 0))
         
         dot_x = panel_x + 94
-        pygame.draw.circle(screen, COMPOUND_COLORS.get(compound, (150, 150, 150)), (dot_x, y_pos + 15), 5)
+        # Tyre health ring with degradation model
+        _health_pct = 100
+        if hasattr(draw_dashboard, '_tyre_model') and draw_dashboard._tyre_model and draw_dashboard._tyre_model.fitted:
+            _h = draw_dashboard._tyre_model.get_health(compound, int(tyre_life))
+            _health_pct = _h["health"]
+        else:
+            _health_pct = max(0, int(100 - tyre_life * 2.5))
+        draw_tyre_health_ring(screen, dot_x, y_pos + 15, 8, _health_pct, compound)
         val_font = pygame.font.SysFont("Consolas", 11, bold=True)
         life_surf = val_font.render(f"{tyre_life}L", True, SUBTEXT_COLOR)
-        screen.blit(life_surf, (dot_x + 10, y_pos + 10))
+        screen.blit(life_surf, (dot_x + 13, y_pos + 10))
         
         badge_x = dot_x + 36
         
@@ -663,14 +674,6 @@ def draw_dashboard(
             col = muted_color(col)
         gap_surf = gap_font.render(gap_str, True, col)
         screen.blit(gap_surf, (panel_x + 204, y_pos + 10))
-
-    # --- Seek Bar ---
-    bar_y = screen_h - SEEK_BAR_HEIGHT
-    pygame.draw.rect(screen, (10, 10, 10), (0, bar_y, screen_w, SEEK_BAR_HEIGHT))
-    progress = t / total_time if total_time > 0 else 0
-    progress_w = int(screen_w * clamp(progress, 0.0, 1.0))
-    pygame.draw.rect(screen, (200, 50, 50), (0, bar_y, progress_w, SEEK_BAR_HEIGHT))
-    pygame.draw.line(screen, (255, 255, 255), (progress_w, bar_y), (progress_w, screen_h), 2)
 
     return sidebar_rects
 
@@ -791,7 +794,275 @@ def draw_similarity_panel(screen, focused_driver, driver_info, similarity_matrix
     return {}
 
 
-def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None):
+
+# ---------------------------------------------------------------------------
+# Track status colors  (FIA status codes)
+# ---------------------------------------------------------------------------
+_STATUS_TRACK_COLORS = {
+    "1": (60, 60, 70),      # AllClear / Green
+    "2": (200, 180, 0),     # Yellow
+    "4": (180, 100, 30),    # Safety Car
+    "5": (200, 30, 30),     # Red Flag
+    "6": (180, 130, 50),    # VSC
+    "7": (180, 130, 50),    # VSC Ending
+}
+
+def _get_track_status_at(track_statuses, t):
+    """Return the status code active at time *t*."""
+    current = "1"
+    for s in track_statuses:
+        if s["time"] <= t:
+            current = s["status"]
+        else:
+            break
+    return current
+
+def _status_label(code):
+    return {"1": "", "2": "YELLOW", "4": "SAFETY CAR",
+            "5": "RED FLAG", "6": "VSC", "7": "VSC ENDING"}.get(code, "")
+
+
+# ---------------------------------------------------------------------------
+# Weather panel
+# ---------------------------------------------------------------------------
+def draw_weather_panel(screen, weather_timeline, t):
+    """Small translucent weather overlay in the top-left area."""
+    if not weather_timeline:
+        return
+    # Find closest weather sample
+    best = weather_timeline[0]
+    for w in weather_timeline:
+        if w["time"] <= t:
+            best = w
+        else:
+            break
+    panel_w, panel_h = 195, 140
+    px, py = 18, HEADER_HEIGHT + 14
+    bg = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+    bg.fill((16, 18, 24, 210))
+    screen.blit(bg, (px, py))
+    pygame.draw.rect(screen, UI_BORDER, (px, py, panel_w, panel_h), 1, border_radius=6)
+
+    fnt = pygame.font.SysFont("Consolas", 12, bold=True)
+    fnt_val = pygame.font.SysFont("Consolas", 13)
+    screen.blit(fnt.render("WEATHER", True, (180, 180, 190)), (px + 10, py + 8))
+    items = [
+        ("Air",   f"{best.get('AirTemp', 0):.1f} C"),
+        ("Track", f"{best.get('TrackTemp', 0):.1f} C"),
+        ("Humid", f"{best.get('Humidity', 0):.0f}%"),
+        ("Wind",  f"{best.get('WindSpeed', 0):.0f} km/h"),
+        ("Rain",  "Yes" if best.get("Rainfall", 0) > 0 else "No"),
+    ]
+    for i, (label, val) in enumerate(items):
+        y = py + 28 + i * 20
+        screen.blit(fnt.render(label, True, SUBTEXT_COLOR), (px + 10, y))
+        screen.blit(fnt_val.render(val, True, TEXT_COLOR), (px + 75, y))
+
+
+# ---------------------------------------------------------------------------
+# Race control feed (scrolling)
+# ---------------------------------------------------------------------------
+def draw_race_control_feed(screen, rc_messages, t, screen_w, show_feed):
+    """Draw recent race control messages as a scrolling feed."""
+    if not show_feed or not rc_messages:
+        return
+    recent = [m for m in rc_messages if m["time"] <= t][-8:]
+    if not recent:
+        return
+    panel_w = 340
+    panel_h = 20 + len(recent) * 18
+    px = screen_w - SIDEBAR_WIDTH - panel_w - 15
+    py = HEADER_HEIGHT + 14
+    bg = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+    bg.fill((16, 18, 24, 210))
+    screen.blit(bg, (px, py))
+    pygame.draw.rect(screen, UI_BORDER, (px, py, panel_w, panel_h), 1, border_radius=6)
+    fnt = pygame.font.SysFont("Consolas", 11)
+    fnt_b = pygame.font.SysFont("Consolas", 11, bold=True)
+    screen.blit(fnt_b.render("RACE CONTROL", True, (180, 180, 190)), (px + 8, py + 4))
+    for i, msg in enumerate(reversed(recent)):
+        y = py + 22 + i * 18
+        flag = msg.get("flag", "")
+        col = (220, 220, 220)
+        if "YELLOW" in flag.upper():
+            col = (220, 200, 0)
+        elif "RED" in flag.upper():
+            col = (220, 50, 50)
+        elif "GREEN" in flag.upper():
+            col = (60, 220, 80)
+        elif "BLUE" in flag.upper():
+            col = (80, 140, 255)
+        mins = int(msg["time"] // 60)
+        secs = int(msg["time"] % 60)
+        ts = f"{mins:02}:{secs:02}"
+        text = msg.get("message", "")[:40]
+        screen.blit(fnt.render(f"{ts}  {text}", True, col), (px + 8, y))
+
+
+# ---------------------------------------------------------------------------
+# Progress bar with event markers
+# ---------------------------------------------------------------------------
+def draw_progress_bar_with_markers(screen, t, total_time, screen_w, screen_h,
+                                   track_statuses, rc_messages, driver_info):
+    """Seek bar with colored status bands and event markers."""
+    bar_h = SEEK_BAR_HEIGHT
+    bar_y = screen_h - bar_h
+    pygame.draw.rect(screen, (10, 10, 10), (0, bar_y, screen_w, bar_h))
+
+    # Draw status color bands
+    if track_statuses and total_time > 0:
+        for i in range(len(track_statuses)):
+            s = track_statuses[i]
+            end_t = track_statuses[i + 1]["time"] if i + 1 < len(track_statuses) else total_time
+            x0 = int(s["time"] / total_time * screen_w)
+            x1 = int(end_t / total_time * screen_w)
+            col = _STATUS_TRACK_COLORS.get(s["status"], (30, 30, 35))
+            if s["status"] != "1":
+                dim = (col[0] // 3, col[1] // 3, col[2] // 3)
+                pygame.draw.rect(screen, dim, (x0, bar_y, x1 - x0, bar_h))
+
+    # Pit stop markers (small triangles)
+    for drv_id, info in driver_info.items():
+        for pw in info.get("PitWindows", []):
+            x = int(pw["start"] / total_time * screen_w) if total_time > 0 else 0
+            pygame.draw.polygon(screen, (220, 190, 40),
+                                [(x, bar_y), (x - 3, bar_y - 6), (x + 3, bar_y - 6)])
+
+    # Progress fill
+    progress = t / total_time if total_time > 0 else 0
+    progress_w = int(screen_w * clamp(progress, 0.0, 1.0))
+    pygame.draw.rect(screen, (200, 50, 50), (0, bar_y, progress_w, bar_h))
+    pygame.draw.line(screen, (255, 255, 255), (progress_w, bar_y), (progress_w, screen_h), 2)
+
+
+# ---------------------------------------------------------------------------
+# Race controls HUD (clickable)
+# ---------------------------------------------------------------------------
+_CTRL_BTN_SIZE = 32
+
+def _ctrl_button_layout(screen_w):
+    """Return list of (name, center_x, center_y) for control buttons."""
+    cy = HEADER_HEIGHT + 14 + 170 + 30
+    cx = 110
+    spacing = _CTRL_BTN_SIZE + 12
+    return [
+        ("rewind",  cx,               cy),
+        ("play",    cx + spacing,      cy),
+        ("forward", cx + 2 * spacing,  cy),
+    ]
+
+def draw_race_controls(screen, paused, speed, screen_w):
+    """Render play/pause/speed buttons."""
+    buttons = _ctrl_button_layout(screen_w)
+    fnt = pygame.font.SysFont("Consolas", 11, bold=True)
+    for name, cx, cy in buttons:
+        r = _CTRL_BTN_SIZE // 2
+        pygame.draw.circle(screen, (30, 35, 45), (cx, cy), r)
+        pygame.draw.circle(screen, UI_BORDER, (cx, cy), r, 2)
+        if name == "play":
+            if paused:
+                # Triangle (play)
+                pygame.draw.polygon(screen, (200, 220, 255),
+                    [(cx - 5, cy - 7), (cx - 5, cy + 7), (cx + 7, cy)])
+            else:
+                # Pause bars
+                pygame.draw.rect(screen, (200, 220, 255), (cx - 5, cy - 6, 4, 12))
+                pygame.draw.rect(screen, (200, 220, 255), (cx + 1, cy - 6, 4, 12))
+        elif name == "rewind":
+            pygame.draw.polygon(screen, (180, 180, 190),
+                [(cx + 4, cy - 6), (cx + 4, cy + 6), (cx - 5, cy)])
+        elif name == "forward":
+            pygame.draw.polygon(screen, (180, 180, 190),
+                [(cx - 4, cy - 6), (cx - 4, cy + 6), (cx + 5, cy)])
+    # Speed label
+    spd_label = fnt.render(f"{speed:g}x", True, ACCENT_BLUE)
+    screen.blit(spd_label, (buttons[-1][1] + _CTRL_BTN_SIZE // 2 + 8, buttons[-1][2] - 7))
+    return buttons
+
+def handle_controls_click(mx, my, buttons, paused, speed, time_val):
+    """Check if a control button was clicked. Returns (paused, speed, time_val)."""
+    for name, cx, cy in buttons:
+        r = _CTRL_BTN_SIZE // 2
+        if (mx - cx) ** 2 + (my - cy) ** 2 <= r * r:
+            if name == "play":
+                paused = not paused
+            elif name == "rewind":
+                time_val -= 5.0
+            elif name == "forward":
+                time_val += 5.0
+            break
+    return paused, speed, time_val
+
+
+# ---------------------------------------------------------------------------
+# Session info banner
+# ---------------------------------------------------------------------------
+def draw_session_info(screen, session_info, screen_w):
+    """Display circuit/country/date below the header."""
+    if not session_info:
+        return
+    fnt = pygame.font.SysFont("Consolas", 11)
+    parts = []
+    if session_info.get("circuit"):
+        parts.append(session_info["circuit"])
+    if session_info.get("country"):
+        parts.append(session_info["country"])
+    if session_info.get("date"):
+        parts.append(str(session_info["date"])[:10])
+    if session_info.get("round"):
+        parts.append(f"R{session_info['round']}")
+    text = "  |  ".join(parts)
+    surf = fnt.render(text, True, (130, 130, 140))
+    screen.blit(surf, (22, HEADER_HEIGHT - 16))
+
+
+# ---------------------------------------------------------------------------
+# Tyre health ring in leaderboard
+# ---------------------------------------------------------------------------
+def draw_tyre_health_ring(screen, cx, cy, radius, health_pct, compound_name):
+    """Draw a ring that depletes clockwise as health drops."""
+    col = tyre_compound_color(compound_name)
+    bg_col = (col[0] // 4, col[1] // 4, col[2] // 4)
+    # Background ring
+    pygame.draw.circle(screen, bg_col, (cx, cy), radius, 2)
+    # Health arc (approximate with line segments)
+    health = max(0, min(100, health_pct))
+    n_segs = max(1, int(24 * health / 100))
+    angle_span = 2 * math.pi * health / 100
+    start_angle = -math.pi / 2  # 12 o'clock
+    points = []
+    for i in range(n_segs + 1):
+        a = start_angle + angle_span * i / n_segs
+        px = cx + int(radius * math.cos(a))
+        py = cy + int(radius * math.sin(a))
+        points.append((px, py))
+    if len(points) > 1:
+        pygame.draw.lines(screen, col, False, points, 2)
+    # Inner dot with compound color
+    pygame.draw.circle(screen, col, (cx, cy), radius - 4)
+
+
+# ---------------------------------------------------------------------------
+# Status banner (SC / VSC / RED FLAG overlay)
+# ---------------------------------------------------------------------------
+def draw_status_banner(screen, status_code, screen_w):
+    """Show a prominent banner when track is under caution."""
+    label = _status_label(status_code)
+    if not label:
+        return
+    col = _STATUS_TRACK_COLORS.get(status_code, (200, 200, 200))
+    banner_h = 28
+    banner_y = HEADER_HEIGHT + 2
+    bg = pygame.Surface((screen_w - SIDEBAR_WIDTH, banner_h), pygame.SRCALPHA)
+    bg.fill((*col, 160))
+    screen.blit(bg, (0, banner_y))
+    fnt = pygame.font.SysFont("Consolas", 16, bold=True)
+    surf = fnt.render(label, True, (255, 255, 255))
+    screen.blit(surf, ((screen_w - SIDEBAR_WIDTH) // 2 - surf.get_width() // 2, banner_y + 5))
+
+
+def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
+               track_statuses=None, rc_messages=None, weather_timeline=None, tyre_model=None):
     if not drivers_data or not timeline:
         print("❌ Replay Error: No driver data or timeline available.")
         return
@@ -831,6 +1102,11 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None)
 
     track_segments = build_track_segments(drivers_data, bounds, screen_size)
 
+    # --- Track geometry (inner/outer edges + normals) ---
+    _center_pts = [track_segments[0]["p1"]] + [s["p2"] for s in track_segments] if track_segments else []
+    from track_geo import build_track_edges as _bte
+    _inner_edge, _outer_edge, _track_normals = _bte(_center_pts, track_half_width=7) if len(_center_pts) > 2 else ([], [], [])
+
     time_val = timeline[0]
     total_time = timeline[-1]
 
@@ -838,6 +1114,7 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None)
     paused = False
     speed = 1.0
     show_heatmap = False
+    draw_dashboard._tyre_model = tyre_model
     gap_mode = "gap"
     focused_driver = None
     ghost_driver = None
@@ -852,6 +1129,15 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None)
     active_overtakes = []
     ot_cooldowns = {}
     pit_entry_times = {}
+    show_rc_feed = False
+    ctrl_buttons = []
+    if track_statuses is None:
+        track_statuses = []
+    if rc_messages is None:
+        rc_messages = []
+    if weather_timeline is None:
+        weather_timeline = []
+    session_info = metadata.get("session_info", {})
 
     while running:
         screen.fill(BG_COLOR)
@@ -902,6 +1188,8 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None)
                     ot_cooldowns = {}
                 if event.key == pygame.K_h:
                     show_heatmap = not show_heatmap
+                if event.key == pygame.K_m:
+                    show_rc_feed = not show_rc_feed
                 if event.key == pygame.K_s:
                     show_similarity = not show_similarity
                 if event.key == pygame.K_g:
@@ -933,7 +1221,13 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None)
                     active_overtakes = []
                     ot_cooldowns = {}
                 else:
-                    pending_click = (mx, my, bool(pygame.key.get_mods() & pygame.KMOD_SHIFT))
+                    # Check race controls HUD buttons first
+                    _p, _s, _tv = handle_controls_click(mx, my, ctrl_buttons, paused, speed, time_val)
+                    if _p != paused or _tv != time_val:
+                        paused = _p
+                        time_val = _tv
+                    else:
+                        pending_click = (mx, my, bool(pygame.key.get_mods() & pygame.KMOD_SHIFT))
 
         if not paused:
             time_val += dt * speed
@@ -991,7 +1285,17 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None)
         for frame_state in current_frame_data:
             frame_state["sx"], frame_state["sy"] = apply_camera((frame_state["gx"], frame_state["gy"]), camera)
 
-        draw_track(screen, track_segments, show_heatmap, max_speed, camera)
+        # Determine current track status
+        _cur_status = _get_track_status_at(track_statuses, time_val)
+        _status_col = _STATUS_TRACK_COLORS.get(_cur_status, TRACK_COLOR)
+        draw_track(screen, track_segments, show_heatmap, max_speed, camera, _status_col)
+
+        # Inner/outer edges (drawn on top of track for border effect)
+        if len(_inner_edge) > 2:
+            cam_inner = [apply_camera(p, camera) for p in _inner_edge]
+            cam_outer = [apply_camera(p, camera) for p in _outer_edge]
+            pygame.draw.lines(screen, (35, 35, 40), False, cam_inner, 2)
+            pygame.draw.lines(screen, (35, 35, 40), False, cam_outer, 2)
 
         if current_frame_data:
             current_frame_data.sort(key=lambda x: x["dist"], reverse=True)
@@ -1151,7 +1455,22 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None)
 
                 label_color = (105, 105, 105) if is_dimmed else (230, 230, 230)
                 lbl = tag_font.render(driver_info[drv_id]["Abbreviation"], True, label_color)
-                screen.blit(lbl, (sx + 12, sy - 12))
+                # Position label using track normals when available
+                _lbl_dx, _lbl_dy = 12, -12
+                if _track_normals is not None and len(_track_normals) > 0 and len(_center_pts) > 0:
+                    _best_ni = 0
+                    _best_dist2 = float('inf')
+                    gx, gy = d.get("gx", sx), d.get("gy", sy)
+                    for _ni in range(0, len(_center_pts), max(1, len(_center_pts) // 60)):
+                        _ddx = _center_pts[_ni][0] - gx
+                        _ddy = _center_pts[_ni][1] - gy
+                        _d2 = _ddx * _ddx + _ddy * _ddy
+                        if _d2 < _best_dist2:
+                            _best_dist2 = _d2
+                            _best_ni = _ni
+                    if _best_ni < len(_track_normals):
+                        _lbl_dx, _lbl_dy = label_offset_from_normal(_track_normals[_best_ni], 30)
+                screen.blit(lbl, (sx + _lbl_dx, sy + _lbl_dy))
 
                 badge_y = sy + 4
                 if d["drs_active"]:
@@ -1203,6 +1522,15 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None)
                     active_overtakes,
                     frame_by_driver
                 )
+            draw_progress_bar_with_markers(screen, time_val, total_time, screen_w, screen_h,
+                                           track_statuses, rc_messages, driver_info)
+
+        # --- New Tier-1 overlays ---
+        draw_status_banner(screen, _cur_status, screen_w)
+        draw_weather_panel(screen, weather_timeline, time_val)
+        draw_race_control_feed(screen, rc_messages, time_val, screen_w, show_rc_feed)
+        draw_session_info(screen, session_info, screen_w)
+        ctrl_buttons = draw_race_controls(screen, paused, speed, screen_w)
 
         pygame.display.flip()
         clock.tick(60)
