@@ -1109,7 +1109,7 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
 
     # --- Track geometry (inner/outer edges + normals) ---
     _center_pts = [track_segments[0]["p1"]] + [s["p2"] for s in track_segments] if track_segments else []
-    from track_geo import build_track_edges as _bte
+    from track_geo import build_track_edges as _bte, label_offset_from_normal
     _inner_edge, _outer_edge, _track_normals = _bte(_center_pts, track_half_width=7) if len(_center_pts) > 2 else ([], [], [])
 
     time_val = timeline[0]
