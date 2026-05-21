@@ -214,13 +214,15 @@ def load_race(year: int, race_name: str):
             pit_windows = build_pit_windows(laps)
             lap_events = build_lap_events(laps)
 
+            lap_stints = {}
             if "Compound" in laps.columns and "TyreLife" in laps.columns:
-                last_lap = laps.dropna(subset=["Compound"]).iloc[-1] if not laps.dropna(subset=["Compound"]).empty else None
-                compound = last_lap["Compound"] if last_lap is not None else "HARD"
-                tyre_life = last_lap["TyreLife"] if last_lap is not None else 0
-            else:
-                compound = "HARD"
-                tyre_life = 0
+                for _, lap_row in laps.iterrows():
+                    lap_num = int(lap_row.get("LapNumber", 0)) if not pd.isna(lap_row.get("LapNumber")) else 0
+                    if not pd.isna(lap_row.get("Compound")):
+                        lap_stints[lap_num] = {
+                            "Compound": str(lap_row["Compound"]),
+                            "TyreLife": float(lap_row.get("TyreLife", 0))
+                        }
 
             driver_info[driver] = {
                 "Abbreviation": drv_details["Abbreviation"],
@@ -231,8 +233,7 @@ def load_race(year: int, race_name: str):
                 "SectorEvents": sector_events,
                 "PitWindows": pit_windows,
                 "LapEvents": lap_events,
-                "Compound": str(compound),
-                "TyreLife": float(tyre_life)
+                "LapStints": lap_stints
             }
 
             # Extract Telemetry
