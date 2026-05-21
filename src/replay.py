@@ -105,6 +105,34 @@ def get_sector_flash(info, t):
     }
 
 
+def is_in_pit_window(info, t):
+    return any(window["start"] <= t <= window["end"] for window in info.get("PitWindows", []))
+
+
+def get_live_fastest_lap(driver_info, t):
+    fastest_driver = None
+    fastest_lap_time = None
+    personal_bests = {}
+
+    for drv_id, info in driver_info.items():
+        best_time = None
+        for event in info.get("LapEvents", []):
+            if event.get("time", 0) > t:
+                continue
+
+            lap_time = event.get("lap_time")
+            if lap_time is not None and (best_time is None or lap_time < best_time):
+                best_time = lap_time
+
+        if best_time is not None:
+            personal_bests[drv_id] = best_time
+            if fastest_lap_time is None or best_time < fastest_lap_time:
+                fastest_driver = drv_id
+                fastest_lap_time = best_time
+
+    return fastest_driver, fastest_lap_time, personal_bests
+
+
 def is_drs_active(value):
     return safe_float(value) >= 10.0
 
@@ -358,10 +386,13 @@ def draw_dashboard(
 
         badge_x = panel_x + 94
         if drv_id == fastest_driver:
-            draw_badge(screen, "FL", font_badge, badge_x, y_pos + 9, (255, 245, 255), (80, 35, 110))
-            badge_x += 30
+            crown_surf = name_font.render("♕", True, FASTEST_PURPLE)
+            screen.blit(crown_surf, (badge_x, y_pos + 6))
+            badge_x += 26
         if drv_id in pit_drivers:
-            draw_badge(screen, "PIT", font_badge, badge_x, y_pos + 9, (30, 20, 0), PIT_YELLOW)
+            flash = 0.5 + 0.5 * math.sin(t * 8)
+            pit_color = lerp_color((120, 80, 10), PIT_YELLOW, flash)
+            draw_badge(screen, "PIT", font_badge, badge_x, y_pos + 9, (30, 20, 0), pit_color)
             badge_x += 38
         if drv_id in drs_drivers:
             draw_badge(screen, "DRS", font_badge, badge_x, y_pos + 9, (0, 40, 8), DRS_GREEN)
@@ -450,8 +481,8 @@ def run_replay(drivers_data, bounds, timeline, metadata):
 
     driver_info = metadata["driver_info"]
     total_laps = metadata.get("total_laps", 0)
-    fastest_driver = metadata.get("fastest_driver")
-    fastest_lap_time = metadata.get("fastest_lap_time")
+    fastest_driver = None
+    fastest_lap_time = None
 
     # --- DATA PREP (Calculate CumDist BEFORE using it) ---
     max_speed = 1.0
@@ -576,9 +607,11 @@ def run_replay(drivers_data, bounds, timeline, metadata):
 
             state = get_interpolated_state(df, time_val)
             sx, sy = scale_point(state["X"], state["Y"], bounds, screen_size)
-            sector_flash = get_sector_flash(driver_info.get(drv_code, {}), time_val)
+            info = driver_info.get(drv_code, {})
+            sector_flash = get_sector_flash(info, time_val)
             drs_active = is_drs_active(state["DRS"])
-            in_pit = state["Speed"] < 5 and time_val > timeline[0] + 2
+            in_pit_window = is_in_pit_window(info, time_val)
+            in_pit = state["Speed"] < 5 and (in_pit_window or not info.get("PitWindows")) and time_val > timeline[0] + 2
 
             trails[drv_code].append((sx, sy, state["Speed"]))
             if len(trails[drv_code]) > TRAIL_LENGTH:
@@ -612,6 +645,8 @@ def run_replay(drivers_data, bounds, timeline, metadata):
             if current_lap == 0:
                 current_lap = int(leader_dist / track_length_approx) + 1
 
+            fastest_driver, fastest_lap_time, _ = get_live_fastest_lap(driver_info, time_val)
+
             gaps = {}
             intervals = {}
             for pos, d in enumerate(current_frame_data):
@@ -624,7 +659,7 @@ def run_replay(drivers_data, bounds, timeline, metadata):
 
             list_start_y = HEADER_HEIGHT + 40
             row_h = 36
-            smoothing = min(1.0, dt * 9.0)
+            smoothing = min(1.0, dt / 0.3)
             for pos, drv_id in enumerate(leaderboard_order):
                 target_y = list_start_y + (pos * row_h)
                 if drv_id not in row_positions:

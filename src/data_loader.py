@@ -80,6 +80,56 @@ def build_sector_events(laps, overall_sector_bests):
     return sorted(events, key=lambda event: event["time"])
 
 
+def build_pit_windows(laps):
+    if "PitInTime" not in laps.columns or "PitOutTime" not in laps.columns:
+        return []
+
+    pit_entries = []
+    pit_exits = []
+    for _, lap in laps.iterrows():
+        pit_in = seconds_from_timedelta(lap.get("PitInTime"))
+        pit_out = seconds_from_timedelta(lap.get("PitOutTime"))
+        if pit_in is not None:
+            pit_entries.append(pit_in)
+        if pit_out is not None:
+            pit_exits.append(pit_out)
+
+    pit_entries.sort()
+    pit_exits.sort()
+    windows = []
+    exit_idx = 0
+    for pit_in in pit_entries:
+        while exit_idx < len(pit_exits) and pit_exits[exit_idx] <= pit_in:
+            exit_idx += 1
+
+        pit_out = pit_exits[exit_idx] if exit_idx < len(pit_exits) else pit_in + 90
+        windows.append({"start": pit_in, "end": pit_out})
+        exit_idx += 1
+
+    return windows
+
+
+def build_lap_events(laps):
+    if "LapTime" not in laps.columns or "Time" not in laps.columns:
+        return []
+
+    events = []
+    for _, lap in laps.sort_values(by="LapNumber").iterrows():
+        lap_time = seconds_from_timedelta(lap.get("LapTime"))
+        event_time = seconds_from_timedelta(lap.get("Time"))
+        if lap_time is None or event_time is None:
+            continue
+
+        lap_number = int(lap["LapNumber"]) if not pd.isna(lap.get("LapNumber")) else 0
+        events.append({
+            "time": event_time,
+            "lap_time": lap_time,
+            "lap_number": lap_number
+        })
+
+    return events
+
+
 def load_race(year: int, race_name: str):
     """
     Loads F1 telemetry data for a specific year and race.
@@ -140,6 +190,8 @@ def load_race(year: int, race_name: str):
                     best_lap_number = int(best_lap["LapNumber"])
 
             sector_events = build_sector_events(laps, overall_sector_bests)
+            pit_windows = build_pit_windows(laps)
+            lap_events = build_lap_events(laps)
 
             driver_info[driver] = {
                 "Abbreviation": drv_details["Abbreviation"],
@@ -147,7 +199,9 @@ def load_race(year: int, race_name: str):
                 "TeamName": drv_details["TeamName"],
                 "BestLapTime": best_lap_time,
                 "BestLapNumber": best_lap_number,
-                "SectorEvents": sector_events
+                "SectorEvents": sector_events,
+                "PitWindows": pit_windows,
+                "LapEvents": lap_events
             }
 
             # Extract Telemetry
