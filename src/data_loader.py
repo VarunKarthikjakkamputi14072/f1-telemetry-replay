@@ -189,27 +189,14 @@ def build_pit_windows(laps):
     if "PitInTime" not in laps.columns or "PitOutTime" not in laps.columns:
         return []
 
-    pit_entries = []
-    pit_exits = []
+    windows = []
     for _, lap in laps.iterrows():
         pit_in = seconds_from_timedelta(lap.get("PitInTime"))
         pit_out = seconds_from_timedelta(lap.get("PitOutTime"))
-        if pit_in is not None:
-            pit_entries.append(pit_in)
-        if pit_out is not None:
-            pit_exits.append(pit_out)
-
-    pit_entries.sort()
-    pit_exits.sort()
-    windows = []
-    exit_idx = 0
-    for pit_in in pit_entries:
-        while exit_idx < len(pit_exits) and pit_exits[exit_idx] <= pit_in:
-            exit_idx += 1
-
-        pit_out = pit_exits[exit_idx] if exit_idx < len(pit_exits) else pit_in + 90
-        windows.append({"start": pit_in, "end": pit_out})
-        exit_idx += 1
+        if pit_in is not None and pit_out is not None:
+            windows.append({"start": pit_in, "end": pit_out})
+        elif pit_in is not None:
+            windows.append({"start": pit_in, "end": pit_in + 30})
 
     return windows
 
