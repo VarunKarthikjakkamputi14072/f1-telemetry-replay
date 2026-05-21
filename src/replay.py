@@ -41,7 +41,7 @@ def lerp_color(a, b, alpha):
     return tuple(int(lerp(a[i], b[i], alpha)) for i in range(3))
 
 
-def muted_color(color, amount=0.25):
+def muted_color(color, amount=0.2):
     return lerp_color(BG_COLOR, color, amount)
 
 
@@ -245,11 +245,16 @@ def get_interpolated_state(df, t):
     return state
 
 
-def draw_track(screen, track_segments, show_heatmap, max_speed):
+def draw_track(screen, track_segments, show_heatmap, max_speed, camera=None):
     if not track_segments:
         return
 
-    points = [track_segments[0]["p1"]] + [segment["p2"] for segment in track_segments]
+    if camera is None:
+        camera = {"scale": 1.0, "target": (0, 0), "center": (0, 0)}
+
+    points = [apply_camera(track_segments[0]["p1"], camera)] + [
+        apply_camera(segment["p2"], camera) for segment in track_segments
+    ]
     if len(points) > 1:
         pygame.draw.lines(screen, TRACK_OUTLINE, False, points, 18)
 
@@ -258,8 +263,8 @@ def draw_track(screen, track_segments, show_heatmap, max_speed):
             pygame.draw.line(
                 screen,
                 speed_to_color(segment["speed"], max_speed),
-                segment["p1"],
-                segment["p2"],
+                apply_camera(segment["p1"], camera),
+                apply_camera(segment["p2"], camera),
                 7
             )
     elif len(points) > 1:
@@ -268,8 +273,152 @@ def draw_track(screen, track_segments, show_heatmap, max_speed):
     overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
     for segment in track_segments:
         if segment["drs"]:
-            pygame.draw.line(overlay, (*DRS_GREEN, 110), segment["p1"], segment["p2"], 12)
+            pygame.draw.line(
+                overlay,
+                (*DRS_GREEN, 110),
+                apply_camera(segment["p1"], camera),
+                apply_camera(segment["p2"], camera),
+                12
+            )
     screen.blit(overlay, (0, 0))
+
+
+def track_view_center(screen_size):
+    screen_w, screen_h = screen_size
+    return ((screen_w - SIDEBAR_WIDTH) // 2, HEADER_HEIGHT + (screen_h - HEADER_HEIGHT - SEEK_BAR_HEIGHT) // 2)
+
+
+def build_camera(focused_driver, frame_by_driver, screen_size):
+    center = track_view_center(screen_size)
+    if focused_driver and focused_driver in frame_by_driver:
+        target = (frame_by_driver[focused_driver]["gx"], frame_by_driver[focused_driver]["gy"])
+        return {"scale": 1.45, "target": target, "center": center}
+    return {"scale": 1.0, "target": center, "center": center}
+
+
+def apply_camera(point, camera):
+    scale = camera.get("scale", 1.0)
+    if scale == 1.0:
+        return int(point[0]), int(point[1])
+
+    target_x, target_y = camera["target"]
+    center_x, center_y = camera["center"]
+    return (
+        int(center_x + (point[0] - target_x) * scale),
+        int(center_y + (point[1] - target_y) * scale)
+    )
+
+
+def draw_dashed_line(surface, color, start, end, width=2, dash_length=10, gap_length=7):
+    x1, y1 = start
+    x2, y2 = end
+    dx = x2 - x1
+    dy = y2 - y1
+    length = math.hypot(dx, dy)
+    if length <= 0:
+        return
+
+    ux = dx / length
+    uy = dy / length
+    pos = 0
+    while pos < length:
+        dash_end = min(pos + dash_length, length)
+        dash_start_pt = (int(x1 + ux * pos), int(y1 + uy * pos))
+        dash_end_pt = (int(x1 + ux * dash_end), int(y1 + uy * dash_end))
+        pygame.draw.line(surface, color, dash_start_pt, dash_end_pt, width)
+        pos += dash_length + gap_length
+
+
+def draw_ghost_trail(screen, points, color, camera):
+    if len(points) <= 1:
+        return
+
+    overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
+    ghost_color = (*color, 105)
+    for i in range(len(points) - 1):
+        p1 = apply_camera((points[i][0], points[i][1]), camera)
+        p2 = apply_camera((points[i + 1][0], points[i + 1][1]), camera)
+        draw_dashed_line(overlay, ghost_color, p1, p2, width=3)
+    screen.blit(overlay, (0, 0))
+
+
+def draw_minimap(screen, track_segments, current_frame_data, focused_driver, ghost_driver, drv_colors):
+    if not track_segments:
+        return
+
+    rect = pygame.Rect(20, HEADER_HEIGHT + 14, 210, 145)
+    pygame.draw.rect(screen, (16, 18, 24), rect, border_radius=8)
+    pygame.draw.rect(screen, UI_BORDER, rect, width=1, border_radius=8)
+
+    points = [track_segments[0]["p1"]] + [segment["p2"] for segment in track_segments]
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    range_x = max(1, max_x - min_x)
+    range_y = max(1, max_y - min_y)
+    pad = 14
+
+    def mini_point(point):
+        x = rect.x + pad + int((point[0] - min_x) / range_x * (rect.w - pad * 2))
+        y = rect.y + pad + int((point[1] - min_y) / range_y * (rect.h - pad * 2))
+        return x, y
+
+    mini_points = [mini_point(point) for point in points]
+    if len(mini_points) > 1:
+        pygame.draw.lines(screen, (70, 74, 86), False, mini_points, 2)
+
+    mini_font = pygame.font.SysFont("Consolas", 11, bold=True)
+    screen.blit(mini_font.render("MINI MAP", True, SUBTEXT_COLOR), (rect.x + 10, rect.y + 8))
+
+    for d in current_frame_data:
+        drv_id = d["id"]
+        pos = mini_point((d["gx"], d["gy"]))
+        radius = 4 if drv_id in (focused_driver, ghost_driver) else 3
+        color = drv_colors.get(drv_id, (220, 220, 220))
+        if drv_id == ghost_driver:
+            pygame.draw.circle(screen, (245, 245, 245), pos, radius + 2, width=1)
+        if drv_id == focused_driver:
+            pygame.draw.circle(screen, ACCENT_BLUE, pos, radius + 3, width=1)
+        pygame.draw.circle(screen, color, pos, radius)
+
+
+def draw_delta_panel(screen, focused_driver, ghost_driver, driver_info, frame_by_driver, delta_history):
+    if not focused_driver or not ghost_driver:
+        return
+    if focused_driver not in frame_by_driver or ghost_driver not in frame_by_driver:
+        return
+
+    rect = pygame.Rect(20, HEADER_HEIGHT + 170, 210, 105)
+    pygame.draw.rect(screen, (16, 18, 24), rect, border_radius=8)
+    pygame.draw.rect(screen, UI_BORDER, rect, width=1, border_radius=8)
+
+    focus_abbr = driver_info[focused_driver]["Abbreviation"]
+    ghost_abbr = driver_info[ghost_driver]["Abbreviation"]
+    delta = delta_history[-1] if delta_history else 0.0
+
+    font_title = pygame.font.SysFont("Consolas", 12, bold=True)
+    font_value = pygame.font.SysFont("Consolas", 16, bold=True)
+    screen.blit(font_title.render(f"DELTA {focus_abbr} vs {ghost_abbr}", True, SUBTEXT_COLOR), (rect.x + 10, rect.y + 8))
+
+    label = f"{ghost_abbr} {'+' if delta >= 0 else ''}{delta:.2f}s"
+    value_color = (255, 120, 120) if delta > 0 else (120, 255, 145)
+    screen.blit(font_value.render(label, True, value_color), (rect.x + 10, rect.y + 28))
+
+    if len(delta_history) < 2:
+        return
+
+    chart = pygame.Rect(rect.x + 10, rect.y + 58, rect.w - 20, 34)
+    pygame.draw.line(screen, (70, 74, 86), (chart.x, chart.centery), (chart.right, chart.centery), 1)
+    visible = delta_history[-80:]
+    max_abs = max(0.1, max(abs(value) for value in visible))
+    points = []
+    for idx, value in enumerate(visible):
+        x = chart.x + int(idx / max(1, len(visible) - 1) * chart.w)
+        y = chart.centery - int((value / max_abs) * (chart.h // 2))
+        points.append((x, y))
+    if len(points) > 1:
+        pygame.draw.lines(screen, FASTEST_PURPLE, False, points, 2)
 
 
 def draw_dashboard(
@@ -322,7 +471,7 @@ def draw_dashboard(
         screen.blit(font_small.render(fl_text, True, FASTEST_PURPLE), (22, 50))
 
     mode_text = f"G: {'intervals' if gap_mode == 'interval' else 'leader gaps'}"
-    help_text = "Space pause | 1-4 speed | Arrows seek/speed | H heatmap | Click driver focus | F clear"
+    help_text = "Click focus | Shift+click ghost | C clear ghost | H heatmap | G gap/interval | F clear"
     screen.blit(font_small.render(mode_text, True, (190, 190, 190)), (screen_w // 2 + 135, 50))
     screen.blit(font_small.render(help_text, True, (120, 120, 120)), (screen_w - SIDEBAR_WIDTH - 610, 50))
 
@@ -530,7 +679,9 @@ def run_replay(drivers_data, bounds, timeline, metadata):
     show_heatmap = True
     gap_mode = "gap"
     focused_driver = None
+    ghost_driver = None
     sidebar_rects = {}
+    delta_history = []
 
     drv_colors = {drv: parse_team_color(info["TeamColor"]) for drv, info in driver_info.items()}
     trails = {drv: [] for drv in drivers_data}
@@ -573,10 +724,16 @@ def run_replay(drivers_data, bounds, timeline, metadata):
                     gap_mode = "interval" if gap_mode == "gap" else "gap"
                 if event.key == pygame.K_f:
                     focused_driver = None
+                    ghost_driver = None
+                    delta_history = []
+                if event.key == pygame.K_c:
+                    ghost_driver = None
+                    delta_history = []
                 if event.key == pygame.K_r:
                     time_val = timeline[0]
                     trails = {drv: [] for drv in drivers_data}
                     row_positions = {}
+                    delta_history = []
 
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 mx, my = pygame.mouse.get_pos()
@@ -584,18 +741,18 @@ def run_replay(drivers_data, bounds, timeline, metadata):
                     ratio = mx / screen_w
                     time_val = ratio * total_time
                     trails = {drv: [] for drv in drivers_data}
+                    delta_history = []
                 else:
-                    pending_click = (mx, my)
+                    pending_click = (mx, my, bool(pygame.key.get_mods() & pygame.KMOD_SHIFT))
 
         if not paused:
             time_val += dt * speed
             if time_val > total_time:
                 time_val = timeline[0]
                 trails = {drv: [] for drv in drivers_data}
+                delta_history = []
 
         time_val = max(timeline[0], min(time_val, total_time))
-
-        draw_track(screen, track_segments, show_heatmap, max_speed)
 
         # --- UPDATE DRIVERS ---
         current_frame_data = []
@@ -606,14 +763,14 @@ def run_replay(drivers_data, bounds, timeline, metadata):
                 continue
 
             state = get_interpolated_state(df, time_val)
-            sx, sy = scale_point(state["X"], state["Y"], bounds, screen_size)
+            gx, gy = scale_point(state["X"], state["Y"], bounds, screen_size)
             info = driver_info.get(drv_code, {})
             sector_flash = get_sector_flash(info, time_val)
             drs_active = is_drs_active(state["DRS"])
             in_pit_window = is_in_pit_window(info, time_val)
             in_pit = state["Speed"] < 5 and (in_pit_window or not info.get("PitWindows")) and time_val > timeline[0] + 2
 
-            trails[drv_code].append((sx, sy, state["Speed"]))
+            trails[drv_code].append((gx, gy, state["Speed"]))
             if len(trails[drv_code]) > TRAIL_LENGTH:
                 trails[drv_code].pop(0)
 
@@ -621,8 +778,10 @@ def run_replay(drivers_data, bounds, timeline, metadata):
                 "id": drv_code,
                 "dist": state["CumDist"],
                 "lap": state["LapNumber"],
-                "sx": sx,
-                "sy": sy,
+                "gx": gx,
+                "gy": gy,
+                "sx": gx,
+                "sy": gy,
                 "speed": state["Speed"],
                 "throttle": state["Throttle"],
                 "brake": state["Brake"],
@@ -634,6 +793,12 @@ def run_replay(drivers_data, bounds, timeline, metadata):
             }
             current_frame_data.append(frame_state)
             frame_by_driver[drv_code] = frame_state
+
+        camera = build_camera(focused_driver, frame_by_driver, screen_size)
+        for frame_state in current_frame_data:
+            frame_state["sx"], frame_state["sy"] = apply_camera((frame_state["gx"], frame_state["gy"]), camera)
+
+        draw_track(screen, track_segments, show_heatmap, max_speed, camera)
 
         if current_frame_data:
             current_frame_data.sort(key=lambda x: x["dist"], reverse=True)
@@ -670,22 +835,52 @@ def run_replay(drivers_data, bounds, timeline, metadata):
             if pending_click:
                 clicked_driver = None
                 for drv_id, rect in sidebar_rects.items():
-                    if rect.collidepoint(pending_click):
+                    if rect.collidepoint((pending_click[0], pending_click[1])):
                         clicked_driver = drv_id
                         break
 
+                is_shift_click = pending_click[2]
                 if clicked_driver is None:
-                    px, py = pending_click
+                    px, py = pending_click[0], pending_click[1]
                     for d in current_frame_data:
                         if math.hypot(px - d["sx"], py - d["sy"]) <= 16:
                             clicked_driver = d["id"]
                             break
 
                 if clicked_driver:
-                    focused_driver = None if focused_driver == clicked_driver else clicked_driver
+                    if is_shift_click:
+                        if focused_driver is None:
+                            focused_driver = clicked_driver
+                        elif clicked_driver != focused_driver:
+                            ghost_driver = None if ghost_driver == clicked_driver else clicked_driver
+                            delta_history = []
+                    else:
+                        if focused_driver == clicked_driver:
+                            focused_driver = None
+                            ghost_driver = None
+                            delta_history = []
+                        else:
+                            focused_driver = clicked_driver
+                            if ghost_driver == clicked_driver:
+                                ghost_driver = None
+                            delta_history = []
 
-            # Draw unfocused cars first, then focused car on top.
-            draw_order = [d for d in current_frame_data if d["id"] != focused_driver]
+                    camera = build_camera(focused_driver, frame_by_driver, screen_size)
+                    for frame_state in current_frame_data:
+                        frame_state["sx"], frame_state["sy"] = apply_camera((frame_state["gx"], frame_state["gy"]), camera)
+
+            if focused_driver and ghost_driver and focused_driver in frame_by_driver and ghost_driver in frame_by_driver:
+                delta = (frame_by_driver[ghost_driver]["dist"] - frame_by_driver[focused_driver]["dist"]) / 70.0
+                delta_history.append(delta)
+                if len(delta_history) > 240:
+                    delta_history.pop(0)
+
+            if ghost_driver in trails:
+                draw_ghost_trail(screen, trails[ghost_driver], drv_colors.get(ghost_driver, (220, 220, 220)), camera)
+
+            # Draw unfocused cars first, then comparison and focused cars on top.
+            draw_order = [d for d in current_frame_data if d["id"] not in (focused_driver, ghost_driver)]
+            draw_order += [d for d in current_frame_data if d["id"] == ghost_driver]
             draw_order += [d for d in current_frame_data if d["id"] == focused_driver]
 
             for d in draw_order:
@@ -695,12 +890,12 @@ def run_replay(drivers_data, bounds, timeline, metadata):
                     continue
 
                 base_color = drv_colors[drv_code]
-                is_dimmed = focused_driver is not None and drv_code != focused_driver
+                is_dimmed = focused_driver is not None and drv_code not in (focused_driver, ghost_driver)
                 color = muted_color(base_color) if is_dimmed else base_color
 
                 for i in range(len(pts) - 1):
-                    p1 = (pts[i][0], pts[i][1])
-                    p2 = (pts[i + 1][0], pts[i + 1][1])
+                    p1 = apply_camera((pts[i][0], pts[i][1]), camera)
+                    p2 = apply_camera((pts[i + 1][0], pts[i + 1][1]), camera)
                     width = trail_width(pts[i + 1][2], max_speed)
                     if drv_code == focused_driver:
                         pygame.draw.line(screen, (5, 5, 8), p1, p2, width + 4)
@@ -710,13 +905,15 @@ def run_replay(drivers_data, bounds, timeline, metadata):
             for d in draw_order:
                 drv_id = d["id"]
                 c = drv_colors[drv_id]
-                is_dimmed = focused_driver is not None and drv_id != focused_driver
+                is_dimmed = focused_driver is not None and drv_id not in (focused_driver, ghost_driver)
                 if is_dimmed:
                     c = muted_color(c)
 
                 sx, sy = d["sx"], d["sy"]
                 radius = 9 if drv_id == focused_driver else 7
 
+                if drv_id == ghost_driver:
+                    pygame.draw.circle(screen, (245, 245, 245), (sx, sy), 13, width=2)
                 if drv_id == focused_driver:
                     pygame.draw.circle(screen, ACCENT_BLUE, (sx, sy), 14, width=2)
 
@@ -754,6 +951,8 @@ def run_replay(drivers_data, bounds, timeline, metadata):
             pit_drivers = {d["id"] for d in current_frame_data if d["in_pit"]}
             drs_drivers = {d["id"] for d in current_frame_data if d["drs_active"]}
 
+            draw_minimap(screen, track_segments, current_frame_data, focused_driver, ghost_driver, drv_colors)
+            draw_delta_panel(screen, focused_driver, ghost_driver, driver_info, frame_by_driver, delta_history)
             draw_telemetry_overlay(screen, focused_driver, driver_info, frame_by_driver, max_speed)
             sidebar_rects = draw_dashboard(
                 screen,
