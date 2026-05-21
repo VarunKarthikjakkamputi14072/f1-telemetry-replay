@@ -479,7 +479,8 @@ def draw_dashboard(
     pit_drivers,
     drs_drivers,
     row_positions,
-    active_overtakes
+    active_overtakes,
+    frame_by_driver
 ):
     screen_w, screen_h = screen.get_size()
 
@@ -599,8 +600,19 @@ def draw_dashboard(
             "SOFT": (220, 40, 40), "MEDIUM": (220, 190, 30),
             "HARD": (240, 240, 240), "INTERMEDIATE": (60, 180, 60), "WET": (60, 100, 220)
         }
-        compound = info.get("Compound", "HARD")
-        tyre_life = int(info.get("TyreLife", 0))
+        drv_lap = int(frame_by_driver[drv_id]["lap"])
+        lap_stints = info.get("LapStints", {})
+        
+        # Try to find exactly this lap, or fallback to the latest known stint if missing
+        stint = lap_stints.get(drv_lap)
+        if not stint:
+            # Fallback for laps before the first recorded stint, or if missing
+            past_stints = [k for k in lap_stints.keys() if k <= drv_lap]
+            stint_key = max(past_stints) if past_stints else (min(lap_stints.keys()) if lap_stints else 0)
+            stint = lap_stints.get(stint_key, {})
+            
+        compound = stint.get("Compound", "HARD")
+        tyre_life = int(stint.get("TyreLife", 0))
         
         dot_x = panel_x + 130
         pygame.draw.circle(screen, COMPOUND_COLORS.get(compound, (240, 240, 240)), (dot_x, y_pos + 15), 5)
@@ -627,7 +639,10 @@ def draw_dashboard(
             flash = 0.5 + 0.5 * math.sin(t * 8)
             pit_color = lerp_color((120, 80, 10), PIT_YELLOW, flash)
             pit_dur = pit_drivers[drv_id]
-            badge_rect = draw_badge(screen, f"PIT {pit_dur:.1f}s", font_badge, badge_x, y_pos + 9, (30, 20, 0), pit_color)
+            if pit_dur < 120:
+                badge_rect = draw_badge(screen, f"PIT {pit_dur:.1f}s", font_badge, badge_x, y_pos + 9, (30, 20, 0), pit_color)
+            else:
+                badge_rect = draw_badge(screen, "OUT", font_badge, badge_x, y_pos + 9, (30, 0, 0), (255, 60, 60))
             badge_x = badge_rect.right + 4
         if drv_id in drs_drivers:
             draw_badge(screen, "DRS", font_badge, badge_x, y_pos + 9, (0, 40, 8), DRS_GREEN)
@@ -1143,7 +1158,10 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None)
                     if d["id"] not in pit_entry_times:
                         pit_entry_times[d["id"]] = time_val
                     dur = time_val - pit_entry_times[d["id"]]
-                    draw_badge(screen, f"PIT {dur:.1f}s", badge_font, sx + 12, badge_y, (30, 20, 0), PIT_YELLOW)
+                    if dur < 120:
+                        draw_badge(screen, f"PIT {dur:.1f}s", badge_font, sx + 12, badge_y, (30, 20, 0), PIT_YELLOW)
+                    else:
+                        draw_badge(screen, "OUT", badge_font, sx + 12, badge_y, (30, 0, 0), (255, 60, 60))
                     badge_y += 16
                 else:
                     pit_entry_times.pop(d["id"], None)
@@ -1179,7 +1197,8 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None)
                     pit_drivers,
                     drs_drivers,
                     row_positions,
-                    active_overtakes
+                    active_overtakes,
+                    frame_by_driver
                 )
 
         pygame.display.flip()
