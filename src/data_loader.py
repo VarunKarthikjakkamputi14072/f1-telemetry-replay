@@ -20,6 +20,24 @@ def seconds_from_timedelta(value):
         return None
 
 
+def adaptive_dropout_threshold(dists: np.ndarray) -> float:
+    valid = dists[dists > 0]
+    if len(valid) == 0: return 150.0
+    median = np.median(valid)
+    return max(150.0, float(median * 3.0))
+
+def compute_lateral_g(df: pd.DataFrame) -> pd.Series:
+    if "Time" not in df.columns or "X" not in df.columns or "Y" not in df.columns:
+        return pd.Series(0, index=df.index)
+    dt = df["Time"].diff().dt.total_seconds().replace(0, np.nan)
+    vx = df["X"].diff() / dt
+    vy = df["Y"].diff() / dt
+    ax = vx.diff() / dt
+    ay = vy.diff() / dt
+    speed_sq = vx**2 + vy**2
+    lateral_g = (vx * ay - vy * ax).abs() / speed_sq.replace(0, np.nan) / 9.81
+    return lateral_g.fillna(0)
+
 def compute_overall_sector_bests(laps):
     sector_bests = {}
     for sector in (1, 2, 3):
@@ -196,6 +214,14 @@ def load_race(year: int, race_name: str):
             pit_windows = build_pit_windows(laps)
             lap_events = build_lap_events(laps)
 
+            if "Compound" in laps.columns and "TyreLife" in laps.columns:
+                last_lap = laps.dropna(subset=["Compound"]).iloc[-1] if not laps.dropna(subset=["Compound"]).empty else None
+                compound = last_lap["Compound"] if last_lap is not None else "HARD"
+                tyre_life = last_lap["TyreLife"] if last_lap is not None else 0
+            else:
+                compound = "HARD"
+                tyre_life = 0
+
             driver_info[driver] = {
                 "Abbreviation": drv_details["Abbreviation"],
                 "TeamColor": f"#{color}",
@@ -204,7 +230,9 @@ def load_race(year: int, race_name: str):
                 "BestLapNumber": best_lap_number,
                 "SectorEvents": sector_events,
                 "PitWindows": pit_windows,
-                "LapEvents": lap_events
+                "LapEvents": lap_events,
+                "Compound": str(compound),
+                "TyreLife": float(tyre_life)
             }
 
             # Extract Telemetry
@@ -258,6 +286,8 @@ def load_race(year: int, race_name: str):
             # UNIT FIX: Convert Decimeters to Meters
             telemetry["X"] = telemetry["X"] / 10.0
             telemetry["Y"] = telemetry["Y"] / 10.0
+            
+            telemetry["LateralG"] = compute_lateral_g(telemetry)
 
             # Normalize Time
             telemetry["Time"] = telemetry["Time"].dt.total_seconds()
@@ -280,7 +310,10 @@ def load_race(year: int, race_name: str):
         dx = np.diff(df["X"].values, prepend=df["X"].values[0])
         dy = np.diff(df["Y"].values, prepend=df["Y"].values[0])
         dists = np.hypot(dx, dy)
-        dists[dists > 150] = 0
+        
+        # --- ADAPTIVE DROPOUT GUARD ---
+        threshold = adaptive_dropout_threshold(dists)
+        dists[dists > threshold] = 0
         df["CumDist"] = np.cumsum(dists)
 
     print("⚙️ Computing driver similarity matrix...")

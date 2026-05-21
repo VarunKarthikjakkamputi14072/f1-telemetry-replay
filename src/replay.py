@@ -40,6 +40,16 @@ def lerp_color(a, b, alpha):
     alpha = clamp(alpha, 0.0, 1.0)
     return tuple(int(lerp(a[i], b[i], alpha)) for i in range(3))
 
+def catmull_rom(p0, p1, p2, p3, alpha):
+    t = alpha
+    q = (
+        (-t**3 + 2*t**2 - t) / 2 * p0 +
+        (3*t**3 - 5*t**2 + 2) / 2 * p1 +
+        (-3*t**3 + 4*t**2 + t) / 2 * p2 +
+        (t**3 - t**2) / 2 * p3
+    )
+    return q
+
 
 def muted_color(color, amount=0.2):
     return lerp_color(BG_COLOR, color, amount)
@@ -243,6 +253,11 @@ def get_interpolated_state(df, t):
 
     t0_row = df.iloc[idx - 1]
     t1_row = df.iloc[idx]
+    
+    # Try to get p0 and p3 for catmull-rom
+    p0_row = df.iloc[max(0, idx - 2)]
+    p3_row = df.iloc[min(len(df) - 1, idx + 1)]
+    
     t0, t1 = safe_float(t0_row["Time"]), safe_float(t1_row["Time"])
 
     if t1 == t0:
@@ -257,9 +272,15 @@ def get_interpolated_state(df, t):
             state[key] = safe_float(source.get(key, default), default)
             continue
 
-        v0 = safe_float(t0_row.get(key, default), default)
-        v1 = safe_float(t1_row.get(key, default), default)
-        state[key] = v0 + (v1 - v0) * alpha
+        v1 = safe_float(t0_row.get(key, default), default)
+        v2 = safe_float(t1_row.get(key, default), default)
+        
+        if key in ("X", "Y"):
+            v0 = safe_float(p0_row.get(key, default), default)
+            v3 = safe_float(p3_row.get(key, default), default)
+            state[key] = catmull_rom(v0, v1, v2, v3, alpha)
+        else:
+            state[key] = v1 + (v2 - v1) * alpha
 
     return state
 
@@ -574,6 +595,19 @@ def draw_dashboard(
 
         badge_x = panel_x + 94
         
+        COMPOUND_COLORS = {
+            "SOFT": (220, 40, 40), "MEDIUM": (220, 190, 30),
+            "HARD": (240, 240, 240), "INTERMEDIATE": (60, 180, 60), "WET": (60, 100, 220)
+        }
+        compound = info.get("Compound", "HARD")
+        tyre_life = int(info.get("TyreLife", 0))
+        
+        dot_x = panel_x + 130
+        pygame.draw.circle(screen, COMPOUND_COLORS.get(compound, (240, 240, 240)), (dot_x, y_pos + 15), 5)
+        val_font = pygame.font.SysFont("Consolas", 11, bold=True)
+        life_surf = val_font.render(f"{tyre_life}L", True, SUBTEXT_COLOR)
+        screen.blit(life_surf, (dot_x + 10, y_pos + 10))
+        
         if ot_attacker:
             tri_x = badge_x + 6
             tri_y = y_pos + 17
@@ -592,8 +626,9 @@ def draw_dashboard(
         if drv_id in pit_drivers:
             flash = 0.5 + 0.5 * math.sin(t * 8)
             pit_color = lerp_color((120, 80, 10), PIT_YELLOW, flash)
-            draw_badge(screen, "PIT", font_badge, badge_x, y_pos + 9, (30, 20, 0), pit_color)
-            badge_x += 38
+            pit_dur = pit_drivers[drv_id]
+            badge_rect = draw_badge(screen, f"PIT {pit_dur:.1f}s", font_badge, badge_x, y_pos + 9, (30, 20, 0), pit_color)
+            badge_x = badge_rect.right + 4
         if drv_id in drs_drivers:
             draw_badge(screen, "DRS", font_badge, badge_x, y_pos + 9, (0, 40, 8), DRS_GREEN)
 
@@ -798,6 +833,7 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None)
     previous_order = []
     active_overtakes = []
     ot_cooldowns = {}
+    pit_entry_times = {}
 
     while running:
         screen.fill(BG_COLOR)
@@ -820,6 +856,16 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None)
                     speed = 1.0
                 if event.key == pygame.K_3:
                     speed = 2.0
+                if event.key == pygame.K_e and focused_driver:
+                    import os
+                    lap = int(frame_by_driver[focused_driver]["lap"])
+                    drv = focused_driver
+                    lap_df = drivers_data[drv][drivers_data[drv]["LapNumber"] == lap].copy()
+                    if "LateralG" not in lap_df.columns:
+                        lap_df["LateralG"] = 0
+                    out_path = f"{drv}_lap{lap}.csv"
+                    lap_df[["CumDist","Speed","Throttle","Brake","LateralG"]].to_csv(out_path, index=False)
+                    print(f"✅ Exported {out_path}")
                 if event.key == pygame.K_4:
                     speed = 4.0
                 if event.key == pygame.K_UP:
@@ -1094,13 +1140,19 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None)
                     draw_badge(screen, "DRS", badge_font, sx + 12, badge_y, (0, 40, 8), DRS_GREEN)
                     badge_y += 16
                 if d["in_pit"]:
-                    draw_badge(screen, "PIT", badge_font, sx + 12, badge_y, (30, 20, 0), PIT_YELLOW)
+                    if d["id"] not in pit_entry_times:
+                        pit_entry_times[d["id"]] = time_val
+                    dur = time_val - pit_entry_times[d["id"]]
+                    draw_badge(screen, f"PIT {dur:.1f}s", badge_font, sx + 12, badge_y, (30, 20, 0), PIT_YELLOW)
                     badge_y += 16
+                else:
+                    pit_entry_times.pop(d["id"], None)
+                    
                 if d.get("sector_flash"):
                     flash_info = d["sector_flash"]
                     draw_badge(screen, flash_info["label"], badge_font, sx + 12, badge_y, (20, 20, 25), flash_info["color"])
 
-            pit_drivers = {d["id"] for d in current_frame_data if d["in_pit"]}
+            pit_drivers = {d["id"]: (time_val - pit_entry_times[d["id"]]) for d in current_frame_data if d["in_pit"]}
             drs_drivers = {d["id"] for d in current_frame_data if d["drs_active"]}
 
             draw_minimap(screen, track_segments, current_frame_data, focused_driver, ghost_driver, drv_colors)
