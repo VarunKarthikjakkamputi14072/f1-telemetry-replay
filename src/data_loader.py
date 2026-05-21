@@ -2,6 +2,9 @@ import fastf1
 import pandas as pd
 import warnings
 import sys
+import numpy as np
+
+from similarity import build_driver_fingerprint
 
 # Suppress technical warnings for a cleaner console
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -272,6 +275,17 @@ def load_race(year: int, race_name: str):
         print("\n❌ ERROR: No valid driver data could be loaded. The session might be empty or incompatible.")
         sys.exit(1)
 
+    # Compute CumDist for all drivers (needed for DTW resampling and replay)
+    for drv, df in drivers_data.items():
+        dx = np.diff(df["X"].values, prepend=df["X"].values[0])
+        dy = np.diff(df["Y"].values, prepend=df["Y"].values[0])
+        dists = np.hypot(dx, dy)
+        dists[dists > 150] = 0
+        df["CumDist"] = np.cumsum(dists)
+
+    print("⚙️ Computing driver similarity matrix...")
+    similarity_matrix = build_driver_fingerprint(drivers_data)
+
     bounds = compute_bounds(drivers_data)
     timeline = build_global_timeline(drivers_data)
 
@@ -289,6 +303,7 @@ def load_race(year: int, race_name: str):
             "bounds": bounds,
             "timeline": timeline
         },
+        "similarity": similarity_matrix,
         "metadata": {
             "year": year,
             "race_name": session.event["EventName"],

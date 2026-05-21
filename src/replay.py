@@ -362,7 +362,7 @@ def draw_ghost_trail(screen, points, color, camera):
 
 
 def draw_minimap(screen, track_segments, current_frame_data, focused_driver, ghost_driver, drv_colors):
-    if not track_segments:
+    if not track_segments or focused_driver is None:
         return
 
     rect = pygame.Rect(20, HEADER_HEIGHT + 14, 210, 145)
@@ -457,7 +457,8 @@ def draw_dashboard(
     fastest_lap_time,
     pit_drivers,
     drs_drivers,
-    row_positions
+    row_positions,
+    active_overtakes
 ):
     screen_w, screen_h = screen.get_size()
 
@@ -535,11 +536,21 @@ def draw_dashboard(
         if y_pos + row_h > screen_h - SEEK_BAR_HEIGHT:
             continue
 
+        ot_attacker = any(o["attacker"] == drv_id for o in active_overtakes)
+        ot_defender = any(o["defender"] == drv_id for o in active_overtakes)
+
         is_dimmed = focused_driver is not None and drv_id != focused_driver
         bg_col = (25, 30, 40) if pos % 2 == 0 else (22, 25, 30)
         if pos == 0:
             bg_col = (35, 40, 50)
-        if is_dimmed:
+            
+        if ot_attacker:
+            pulse = 0.5 + 0.5 * math.sin(t * 12)
+            bg_col = lerp_color(bg_col, (30, 110, 50), pulse)
+        elif ot_defender:
+            pulse = 0.5 + 0.5 * math.sin(t * 12)
+            bg_col = lerp_color(bg_col, (110, 40, 40), pulse)
+        elif is_dimmed:
             bg_col = muted_color(bg_col, 0.7)
 
         row_rect = pygame.Rect(panel_x, y_pos, panel_w, row_h)
@@ -562,6 +573,18 @@ def draw_dashboard(
         screen.blit(name_surf, (panel_x + 50, y_pos + 8))
 
         badge_x = panel_x + 94
+        
+        if ot_attacker:
+            tri_x = badge_x + 6
+            tri_y = y_pos + 17
+            pygame.draw.polygon(screen, (80, 255, 120), [(tri_x, tri_y-5), (tri_x-5, tri_y+4), (tri_x+5, tri_y+4)])
+            badge_x += 18
+        elif ot_defender:
+            tri_x = badge_x + 6
+            tri_y = y_pos + 17
+            pygame.draw.polygon(screen, (255, 80, 80), [(tri_x, tri_y+4), (tri_x-5, tri_y-5), (tri_x+5, tri_y-5)])
+            badge_x += 18
+
         if drv_id == fastest_driver:
             crown_surf = name_font.render("♕", True, FASTEST_PURPLE)
             screen.blit(crown_surf, (badge_x, y_pos + 6))
@@ -651,7 +674,71 @@ def draw_telemetry_overlay(screen, focused_driver, driver_info, frame_by_driver,
     screen.blit(label_font.render(drs_text, True, DRS_GREEN if state["drs_active"] else SUBTEXT_COLOR), (x + panel_w - 118, y + 40))
 
 
-def run_replay(drivers_data, bounds, timeline, metadata):
+def blend_color(fg: tuple, bg: tuple, alpha: float) -> tuple:
+    return tuple(int(f * alpha + b * (1 - alpha)) for f, b in zip(fg, bg))
+
+def draw_similarity_panel(screen, focused_driver, driver_info, similarity_matrix):
+    screen_w, screen_h = screen.get_size()
+    panel_w = SIDEBAR_WIDTH
+    panel_x = screen_w - panel_w
+    panel_y = HEADER_HEIGHT
+
+    # Draw Background
+    pygame.draw.rect(screen, UI_BG, (panel_x, panel_y, panel_w, screen_h - panel_y))
+    pygame.draw.line(screen, UI_BORDER, (panel_x, panel_y), (panel_x, screen_h), 2)
+
+    font_header = pygame.font.SysFont("Consolas", 14, bold=True)
+    font_name = pygame.font.SysFont("Arial", 14, bold=True)
+    font_val = pygame.font.SysFont("Consolas", 13)
+
+    focused_abbr = driver_info.get(focused_driver, {}).get("Abbreviation", focused_driver)
+    header = f"STYLE SIMILARITY — {focused_abbr}"
+    screen.blit(font_header.render(header, True, (210, 210, 210)), (panel_x + 16, panel_y + 16))
+    pygame.draw.line(screen, UI_BORDER, (panel_x, panel_y + 40), (screen_w, panel_y + 40), 1)
+
+    if similarity_matrix is None or focused_driver not in similarity_matrix:
+        screen.blit(font_val.render("No data", True, (120, 120, 120)), (panel_x + 16, panel_y + 60))
+        return {}
+
+    scores = similarity_matrix[focused_driver]
+    # Filter valid
+    valid_scores = [(drv, val) for drv, val in scores.items() if drv != focused_driver and not np.isnan(val)]
+    if not valid_scores:
+        screen.blit(font_val.render("No data", True, (120, 120, 120)), (panel_x + 16, panel_y + 60))
+        return {}
+
+    # Sort lowest first
+    valid_scores.sort(key=lambda x: x[1])
+    max_score = max(x[1] for x in valid_scores) if valid_scores else 1.0
+
+    y = panel_y + 50
+    for drv, score in valid_scores:
+        info = driver_info.get(drv, {})
+        abbr = info.get("Abbreviation", drv)
+        c_hex = info.get("TeamColor", "#CCCCCC").lstrip("#")
+        try:
+            team_color = (int(c_hex[0:2], 16), int(c_hex[2:4], 16), int(c_hex[4:6], 16))
+        except:
+            team_color = (200, 200, 200)
+
+        # Draw stripe
+        pygame.draw.rect(screen, team_color, (panel_x + 16, y, 4, 20))
+        
+        # Draw bar
+        bar_w = int((score / max_score) * (panel_w - 110))
+        bar_color = blend_color(team_color, UI_BG, 0.6)
+        pygame.draw.rect(screen, bar_color, (panel_x + 24, y + 2, bar_w, 16))
+
+        # Text
+        screen.blit(font_name.render(abbr, True, (240, 240, 240)), (panel_x + 28, y + 2))
+        screen.blit(font_val.render(f"{score:.2f}", True, (190, 190, 190)), (panel_x + panel_w - 50, y + 2))
+
+        y += 28
+
+    return {}
+
+
+def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None):
     if not drivers_data or not timeline:
         print("❌ Replay Error: No driver data or timeline available.")
         return
@@ -661,17 +748,10 @@ def run_replay(drivers_data, bounds, timeline, metadata):
     fastest_driver = None
     fastest_lap_time = None
 
-    # --- DATA PREP (Calculate CumDist BEFORE using it) ---
+    # Get max speed for heatmap
     max_speed = 1.0
     for drv_id, df in drivers_data.items():
-        if df.empty:
-            continue
-        coords = df[["X", "Y"]].values
-        diffs = coords[1:] - coords[:-1]
-        dists = np.sqrt((diffs ** 2).sum(axis=1))
-        dists = np.insert(dists, 0, 0)
-        df["CumDist"] = np.cumsum(dists)
-        if "Speed" in df.columns:
+        if not df.empty and "Speed" in df.columns:
             max_speed = max(max_speed, safe_float(df["Speed"].max(), 0))
 
     # Estimate track length dynamically for lap calculation.
@@ -708,6 +788,7 @@ def run_replay(drivers_data, bounds, timeline, metadata):
     gap_mode = "gap"
     focused_driver = None
     ghost_driver = None
+    show_similarity = False
     sidebar_rects = {}
     delta_history = []
 
@@ -716,6 +797,7 @@ def run_replay(drivers_data, bounds, timeline, metadata):
     row_positions = {}
     previous_order = []
     active_overtakes = []
+    ot_cooldowns = {}
 
     while running:
         screen.fill(BG_COLOR)
@@ -748,12 +830,16 @@ def run_replay(drivers_data, bounds, timeline, metadata):
                     time_val += 5.0
                     previous_order = []
                     active_overtakes = []
+                    ot_cooldowns = {}
                 if event.key == pygame.K_LEFT:
                     time_val -= 5.0
                     previous_order = []
                     active_overtakes = []
+                    ot_cooldowns = {}
                 if event.key == pygame.K_h:
                     show_heatmap = not show_heatmap
+                if event.key == pygame.K_s:
+                    show_similarity = not show_similarity
                 if event.key == pygame.K_g:
                     gap_mode = "interval" if gap_mode == "gap" else "gap"
                 if event.key == pygame.K_f:
@@ -770,6 +856,7 @@ def run_replay(drivers_data, bounds, timeline, metadata):
                     delta_history = []
                     previous_order = []
                     active_overtakes = []
+                    ot_cooldowns = {}
 
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 mx, my = pygame.mouse.get_pos()
@@ -780,6 +867,7 @@ def run_replay(drivers_data, bounds, timeline, metadata):
                     delta_history = []
                     previous_order = []
                     active_overtakes = []
+                    ot_cooldowns = {}
                 else:
                     pending_click = (mx, my, bool(pygame.key.get_mods() & pygame.KMOD_SHIFT))
 
@@ -791,6 +879,7 @@ def run_replay(drivers_data, bounds, timeline, metadata):
                 delta_history = []
                 previous_order = []
                 active_overtakes = []
+                ot_cooldowns = {}
 
         time_val = max(timeline[0], min(time_val, total_time))
 
@@ -845,7 +934,7 @@ def run_replay(drivers_data, bounds, timeline, metadata):
             leaderboard_order = [d["id"] for d in current_frame_data]
 
             # --- OVERTAKE DETECTION ---
-            if previous_order:
+            if previous_order and time_val > timeline[0] + 60.0:
                 for new_pos, drv in enumerate(leaderboard_order):
                     if drv in previous_order:
                         old_pos = previous_order.index(drv)
@@ -855,11 +944,14 @@ def run_replay(drivers_data, bounds, timeline, metadata):
                                     if not frame_by_driver[drv]["in_pit"] and not frame_by_driver[passed_drv]["in_pit"]:
                                         # Verify they are physically close to prevent glitch overtakes
                                         if abs(frame_by_driver[drv]["dist"] - frame_by_driver[passed_drv]["dist"]) < 150:
-                                            active_overtakes.append({
-                                                "attacker": drv,
-                                                "defender": passed_drv,
-                                                "time": time_val
-                                            })
+                                            pair = tuple(sorted([drv, passed_drv]))
+                                            if time_val - ot_cooldowns.get(pair, -999) > 10.0:
+                                                active_overtakes.append({
+                                                    "attacker": drv,
+                                                    "defender": passed_drv,
+                                                    "time": time_val
+                                                })
+                                                ot_cooldowns[pair] = time_val
             previous_order = leaderboard_order.copy()
             active_overtakes = [o for o in active_overtakes if 0 <= time_val - o["time"] < 4.0]
 
@@ -907,6 +999,7 @@ def run_replay(drivers_data, bounds, timeline, metadata):
                             break
 
                 if clicked_driver:
+                    show_similarity = False
                     if is_shift_click:
                         if focused_driver is None:
                             focused_driver = clicked_driver
@@ -1013,51 +1106,29 @@ def run_replay(drivers_data, bounds, timeline, metadata):
             draw_minimap(screen, track_segments, current_frame_data, focused_driver, ghost_driver, drv_colors)
             draw_delta_panel(screen, focused_driver, ghost_driver, driver_info, frame_by_driver, delta_history)
             draw_telemetry_overlay(screen, focused_driver, driver_info, frame_by_driver, max_speed)
-            sidebar_rects = draw_dashboard(
-                screen,
-                time_val,
-                speed,
-                driver_info,
-                leaderboard_order,
-                gaps,
-                intervals,
-                current_lap,
-                total_laps,
-                total_time,
-                gap_mode,
-                focused_driver,
-                fastest_driver,
-                fastest_lap_time,
-                pit_drivers,
-                drs_drivers,
-                row_positions
-            )
-
-            # Draw Overtake Notifications
-            if active_overtakes:
-                ot_font = pygame.font.SysFont("Consolas", 14, bold=True)
-                ot_y = screen_h - SEEK_BAR_HEIGHT - 90
-                # Draw unique overtakes in the last 4 seconds
-                drawn_pairs = set()
-                for o in reversed(active_overtakes):
-                    pair = (o["attacker"], o["defender"])
-                    if pair in drawn_pairs: continue
-                    drawn_pairs.add(pair)
-                    
-                    att = driver_info[o["attacker"]]["Abbreviation"]
-                    def_ = driver_info[o["defender"]]["Abbreviation"]
-                    text = f"OVERTAKE: {att} ➔ {def_}"
-                    surf = ot_font.render(text, True, (255, 255, 255))
-                    bg_rect = surf.get_rect(right=screen_w - SIDEBAR_WIDTH - 20, bottom=ot_y)
-                    
-                    # Create a slightly transparent background using an alpha surface
-                    bg_surf = pygame.Surface((bg_rect.w + 16, bg_rect.h + 12), pygame.SRCALPHA)
-                    pygame.draw.rect(bg_surf, (30, 140, 60, 220), bg_surf.get_rect(), border_radius=6)
-                    pygame.draw.rect(bg_surf, (80, 255, 120, 200), bg_surf.get_rect(), width=1, border_radius=6)
-                    
-                    screen.blit(bg_surf, (bg_rect.x - 8, bg_rect.y - 6))
-                    screen.blit(surf, bg_rect)
-                    ot_y -= 40
+            if show_similarity and focused_driver:
+                sidebar_rects = draw_similarity_panel(screen, focused_driver, driver_info, similarity_matrix)
+            else:
+                sidebar_rects = draw_dashboard(
+                    screen,
+                    time_val,
+                    speed,
+                    driver_info,
+                    leaderboard_order,
+                    gaps,
+                    intervals,
+                    current_lap,
+                    total_laps,
+                    total_time,
+                    gap_mode,
+                    focused_driver,
+                    fastest_driver,
+                    fastest_lap_time,
+                    pit_drivers,
+                    drs_drivers,
+                    row_positions,
+                    active_overtakes
+                )
 
         pygame.display.flip()
         clock.tick(60)

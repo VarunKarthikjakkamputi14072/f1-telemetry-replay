@@ -48,7 +48,8 @@ def main():
             race_data["drivers"],
             race_data["track"]["bounds"],
             race_data["track"]["timeline"],
-            race_data["metadata"]
+            race_data["metadata"],
+            race_data.get("similarity")
         )
     except Exception as e:
         print(f"❌ Critical Error running simulation: {e}")
