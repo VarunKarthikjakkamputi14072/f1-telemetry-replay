@@ -1,4 +1,11 @@
 import pygame
+
+_FONTS = {}
+def get_font(name, size, bold=False):
+    key = (name, size, bold)
+    if key not in _FONTS:
+        _FONTS[key] = pygame.font.SysFont(name, size, bold=bold)
+    return _FONTS[key]
 import sys
 import numpy as np
 import math
@@ -423,7 +430,7 @@ def draw_minimap(screen, track_segments, current_frame_data, focused_driver, gho
     if len(mini_points) > 1:
         pygame.draw.lines(screen, (70, 74, 86), False, mini_points, 2)
 
-    mini_font = pygame.font.SysFont("Consolas", 11, bold=True)
+    mini_font = get_font("Consolas", 11, bold=True)
     screen.blit(mini_font.render("MINI MAP", True, SUBTEXT_COLOR), (rect.x + 10, rect.y + 8))
 
     for d in current_frame_data:
@@ -452,8 +459,8 @@ def draw_delta_panel(screen, focused_driver, ghost_driver, driver_info, frame_by
     ghost_abbr = driver_info[ghost_driver]["Abbreviation"]
     delta = delta_history[-1] if delta_history else 0.0
 
-    font_title = pygame.font.SysFont("Consolas", 12, bold=True)
-    font_value = pygame.font.SysFont("Consolas", 16, bold=True)
+    font_title = get_font("Consolas", 12, bold=True)
+    font_value = get_font("Consolas", 16, bold=True)
     screen.blit(font_title.render(f"DELTA {focus_abbr} vs {ghost_abbr}", True, SUBTEXT_COLOR), (rect.x + 10, rect.y + 8))
 
     label = f"{ghost_abbr} {'+' if delta >= 0 else ''}{delta:.2f}s"
@@ -507,10 +514,10 @@ def draw_dashboard(
     seconds = int(t % 60)
     millis = int((t % 1) * 100)
 
-    font_large = pygame.font.SysFont("Consolas", 28, bold=True)
-    font_label = pygame.font.SysFont("Consolas", 12, bold=True)
-    font_small = pygame.font.SysFont("Consolas", 12)
-    font_badge = pygame.font.SysFont("Consolas", 11, bold=True)
+    font_large = get_font("Consolas", 28, bold=True)
+    font_label = get_font("Consolas", 12, bold=True)
+    font_small = get_font("Consolas", 12)
+    font_badge = get_font("Consolas", 11, bold=True)
 
     # 1. Race Time (Left)
     screen.blit(font_label.render("RACE TIME", True, (130, 130, 140)), (22, 12))
@@ -550,7 +557,7 @@ def draw_dashboard(
     pygame.draw.rect(screen, UI_BG, (panel_x, panel_y, panel_w, panel_h))
     pygame.draw.line(screen, UI_BORDER, (panel_x, panel_y), (panel_x, screen_h - SEEK_BAR_HEIGHT), 2)
 
-    header_font = pygame.font.SysFont("Consolas", 13, bold=True)
+    header_font = get_font("Consolas", 13, bold=True)
     pygame.draw.rect(screen, (30, 35, 45), (panel_x, panel_y, panel_w, 35))
 
     gap_header = "INT" if gap_mode == "interval" else "GAP"
@@ -559,8 +566,8 @@ def draw_dashboard(
     screen.blit(header_font.render(gap_header, True, (120, 120, 120)), (panel_x + 204, panel_y + 10))
 
     row_h = 36
-    name_font = pygame.font.SysFont("Consolas", 18, bold=True)
-    gap_font = pygame.font.SysFont("Consolas", 15)
+    name_font = get_font("Consolas", 18, bold=True)
+    gap_font = get_font("Consolas", 15)
 
     sidebar_rects = {}
     ordered_positions = {drv_id: pos for pos, drv_id in enumerate(leaderboard_order)}
@@ -633,7 +640,7 @@ def draw_dashboard(
         else:
             _health_pct = max(0, int(100 - tyre_life * 2.5))
         draw_tyre_health_ring(screen, dot_x, y_pos + 15, 8, _health_pct, compound)
-        val_font = pygame.font.SysFont("Consolas", 11, bold=True)
+        val_font = get_font("Consolas", 11, bold=True)
         life_surf = val_font.render(f"{tyre_life}L", True, SUBTEXT_COLOR)
         screen.blit(life_surf, (dot_x + 13, y_pos + 10))
         
@@ -700,9 +707,9 @@ def draw_telemetry_overlay(screen, focused_driver, driver_info, frame_by_driver,
 
     info = driver_info[focused_driver]
     state = frame_by_driver[focused_driver]
-    title_font = pygame.font.SysFont("Consolas", 16, bold=True)
-    label_font = pygame.font.SysFont("Consolas", 12)
-    value_font = pygame.font.SysFont("Consolas", 18, bold=True)
+    title_font = get_font("Consolas", 16, bold=True)
+    label_font = get_font("Consolas", 12)
+    value_font = get_font("Consolas", 18, bold=True)
 
     title = f"{info['Abbreviation']} TELEMETRY"
     screen.blit(title_font.render(title, True, TEXT_COLOR), (x + 14, y + 10))
@@ -748,9 +755,9 @@ def draw_similarity_panel(screen, focused_driver, driver_info, similarity_matrix
     pygame.draw.rect(screen, UI_BG, (panel_x, panel_y, panel_w, screen_h - panel_y))
     pygame.draw.line(screen, UI_BORDER, (panel_x, panel_y), (panel_x, screen_h), 2)
 
-    font_header = pygame.font.SysFont("Consolas", 14, bold=True)
-    font_name = pygame.font.SysFont("Arial", 14, bold=True)
-    font_val = pygame.font.SysFont("Consolas", 13)
+    font_header = get_font("Consolas", 14, bold=True)
+    font_name = get_font("Arial", 14, bold=True)
+    font_val = get_font("Consolas", 13)
 
     focused_abbr = driver_info.get(focused_driver, {}).get("Abbreviation", focused_driver)
     header = f"STYLE SIMILARITY — {focused_abbr}"
@@ -848,8 +855,8 @@ def draw_weather_panel(screen, weather_timeline, t):
     screen.blit(bg, (px, py))
     pygame.draw.rect(screen, UI_BORDER, (px, py, panel_w, panel_h), 1, border_radius=6)
 
-    fnt = pygame.font.SysFont("Consolas", 12, bold=True)
-    fnt_val = pygame.font.SysFont("Consolas", 13)
+    fnt = get_font("Consolas", 12, bold=True)
+    fnt_val = get_font("Consolas", 13)
     screen.blit(fnt.render("WEATHER", True, (180, 180, 190)), (px + 10, py + 8))
     items = [
         ("Air",   f"{best.get('AirTemp', 0):.1f} C"),
@@ -882,8 +889,8 @@ def draw_race_control_feed(screen, rc_messages, t, screen_w, show_feed):
     bg.fill((16, 18, 24, 210))
     screen.blit(bg, (px, py))
     pygame.draw.rect(screen, UI_BORDER, (px, py, panel_w, panel_h), 1, border_radius=6)
-    fnt = pygame.font.SysFont("Consolas", 11)
-    fnt_b = pygame.font.SysFont("Consolas", 11, bold=True)
+    fnt = get_font("Consolas", 11)
+    fnt_b = get_font("Consolas", 11, bold=True)
     screen.blit(fnt_b.render("RACE CONTROL", True, (180, 180, 190)), (px + 8, py + 4))
     for i, msg in enumerate(reversed(recent)):
         y = py + 22 + i * 18
@@ -959,7 +966,7 @@ def _ctrl_button_layout(screen_w):
 def draw_race_controls(screen, paused, speed, screen_w):
     """Render play/pause/speed buttons."""
     buttons = _ctrl_button_layout(screen_w)
-    fnt = pygame.font.SysFont("Consolas", 11, bold=True)
+    fnt = get_font("Consolas", 11, bold=True)
     for name, cx, cy in buttons:
         r = _CTRL_BTN_SIZE // 2
         pygame.draw.circle(screen, (30, 35, 45), (cx, cy), r)
@@ -1006,7 +1013,7 @@ def draw_session_info(screen, session_info, screen_w):
     """Display circuit/country/date below the header."""
     if not session_info:
         return
-    fnt = pygame.font.SysFont("Consolas", 11)
+    fnt = get_font("Consolas", 11)
     parts = []
     if session_info.get("circuit"):
         parts.append(session_info["circuit"])
@@ -1061,7 +1068,7 @@ def draw_status_banner(screen, status_code, screen_w):
     bg = pygame.Surface((screen_w - SIDEBAR_WIDTH, banner_h), pygame.SRCALPHA)
     bg.fill((*col, 160))
     screen.blit(bg, (0, banner_y))
-    fnt = pygame.font.SysFont("Consolas", 16, bold=True)
+    fnt = get_font("Consolas", 16, bold=True)
     surf = fnt.render(label, True, (255, 255, 255))
     screen.blit(surf, ((screen_w - SIDEBAR_WIDTH) // 2 - surf.get_width() // 2, banner_y + 5))
 
@@ -1102,8 +1109,8 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
     pygame.display.set_caption(f"F1 Telemetry Pro | {metadata.get('race_name', 'Race')}")
     clock = pygame.time.Clock()
 
-    tag_font = pygame.font.SysFont("Arial", 10, bold=True)
-    badge_font = pygame.font.SysFont("Consolas", 10, bold=True)
+    tag_font = get_font("Arial", 10, bold=True)
+    badge_font = get_font("Consolas", 10, bold=True)
 
     track_segments = build_track_segments(drivers_data, bounds, screen_size)
 
