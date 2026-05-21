@@ -182,14 +182,33 @@ def build_track_segments(drivers_data, bounds, screen_size):
         return []
 
     segments = []
+    last_p = None
+    
     for i in range(len(reference_df) - 1):
         row = reference_df.iloc[i]
         next_row = reference_df.iloc[i + 1]
+        
+        # Prevent straight-line anomalies from telemetry dropouts
+        dx = next_row["X"] - row["X"]
+        dy = next_row["Y"] - row["Y"]
+        if math.hypot(dx, dy) > 150:
+            last_p = None
+            continue
+            
         p1 = scale_point(row["X"], row["Y"], bounds, screen_size)
         p2 = scale_point(next_row["X"], next_row["Y"], bounds, screen_size)
+        
+        if last_p is None:
+            last_p = p1
+            
+        # Optimization: Only create a new segment if we've moved at least 3 pixels
+        if math.hypot(p2[0] - last_p[0], p2[1] - last_p[1]) < 3:
+            continue
+            
         speed = safe_float(next_row.get("Speed", 0))
         drs = is_drs_active(next_row.get("DRS", 0))
-        segments.append({"p1": p1, "p2": p2, "speed": speed, "drs": drs})
+        segments.append({"p1": last_p, "p2": p2, "speed": speed, "drs": drs})
+        last_p = p2
 
     return segments
 
@@ -449,31 +468,40 @@ def draw_dashboard(
     minutes = int(t // 60)
     seconds = int(t % 60)
     millis = int((t % 1) * 100)
-    time_str = f"TIME {minutes:02}:{seconds:02}.{millis:02}"
-    lap_str = f"LAP {int(current_lap)} / {total_laps}"
 
-    font_large = pygame.font.SysFont("Consolas", 26, bold=True)
-    font_small = pygame.font.SysFont("Consolas", 13)
+    font_large = pygame.font.SysFont("Consolas", 28, bold=True)
+    font_label = pygame.font.SysFont("Consolas", 12, bold=True)
+    font_small = pygame.font.SysFont("Consolas", 12)
     font_badge = pygame.font.SysFont("Consolas", 11, bold=True)
 
-    screen.blit(font_large.render(time_str, True, (210, 210, 210)), (20, 16))
-    lap_surf = font_large.render(lap_str, True, TEXT_COLOR)
-    screen.blit(lap_surf, (screen_w // 2 - lap_surf.get_width() // 2, 16))
+    # 1. Race Time (Left)
+    screen.blit(font_label.render("RACE TIME", True, (130, 130, 140)), (22, 12))
+    time_val_str = f"{minutes:02}:{seconds:02}.{millis:02}"
+    screen.blit(font_large.render(time_val_str, True, (240, 240, 240)), (20, 26))
 
+    # 2. Lap Counter (Center)
+    lap_val_str = f"{int(current_lap)} / {total_laps}"
+    lap_surf = font_large.render(lap_val_str, True, (255, 255, 255))
+    center_x = (screen_w - SIDEBAR_WIDTH) // 2
+    screen.blit(font_label.render("CURRENT LAP", True, (130, 130, 140)), (center_x - lap_surf.get_width() // 2, 12))
+    screen.blit(lap_surf, (center_x - lap_surf.get_width() // 2, 26))
+
+    # 3. Playback Speed (Right)
     speed_surf = font_large.render(f"{speed:g}x", True, ACCENT_BLUE)
-    screen.blit(speed_surf, (screen_w - SIDEBAR_WIDTH - speed_surf.get_width() - 22, 16))
+    speed_rect = speed_surf.get_rect(right=screen_w - SIDEBAR_WIDTH - 22, top=26)
+    screen.blit(font_label.render("PLAYBACK", True, (130, 130, 140)), (speed_rect.x, 12))
+    screen.blit(speed_surf, speed_rect)
 
+    # 4. Fastest Lap Info (Bottom Left)
     if fastest_driver and fastest_driver in driver_info:
-        fl_text = (
-            f"FASTEST {driver_info[fastest_driver]['Abbreviation']} "
-            f"{format_lap_time(fastest_lap_time)}"
-        )
-        screen.blit(font_small.render(fl_text, True, FASTEST_PURPLE), (22, 50))
+        fl_text = f"FASTEST LAP: {driver_info[fastest_driver]['Abbreviation']} ({format_lap_time(fastest_lap_time)})"
+        screen.blit(font_small.render(fl_text, True, FASTEST_PURPLE), (22, 58))
 
-    mode_text = f"G: {'intervals' if gap_mode == 'interval' else 'leader gaps'}"
-    help_text = "Click focus | Shift+click ghost | C clear ghost | H heatmap | G gap/interval | F clear"
-    screen.blit(font_small.render(mode_text, True, (190, 190, 190)), (screen_w // 2 + 135, 50))
-    screen.blit(font_small.render(help_text, True, (120, 120, 120)), (screen_w - SIDEBAR_WIDTH - 610, 50))
+    # 5. Help Text (Bottom Right)
+    help_text = "[Click] Focus  [Shift+Click] Ghost  [C] Clear Ghost  [H] Heatmap  [G] Gap Mode  [F] Clear All"
+    help_surf = font_small.render(help_text, True, (100, 100, 110))
+    help_rect = help_surf.get_rect(right=screen_w - SIDEBAR_WIDTH - 22, top=58)
+    screen.blit(help_surf, help_rect)
 
     # --- Side Leaderboard ---
     panel_w = SIDEBAR_WIDTH
@@ -676,7 +704,7 @@ def run_replay(drivers_data, bounds, timeline, metadata):
     running = True
     paused = False
     speed = 1.0
-    show_heatmap = True
+    show_heatmap = False
     gap_mode = "gap"
     focused_driver = None
     ghost_driver = None
@@ -686,6 +714,8 @@ def run_replay(drivers_data, bounds, timeline, metadata):
     drv_colors = {drv: parse_team_color(info["TeamColor"]) for drv, info in driver_info.items()}
     trails = {drv: [] for drv in drivers_data}
     row_positions = {}
+    previous_order = []
+    active_overtakes = []
 
     while running:
         screen.fill(BG_COLOR)
@@ -716,8 +746,12 @@ def run_replay(drivers_data, bounds, timeline, metadata):
                     speed = max(speed - 0.5, 0.0)
                 if event.key == pygame.K_RIGHT:
                     time_val += 5.0
+                    previous_order = []
+                    active_overtakes = []
                 if event.key == pygame.K_LEFT:
                     time_val -= 5.0
+                    previous_order = []
+                    active_overtakes = []
                 if event.key == pygame.K_h:
                     show_heatmap = not show_heatmap
                 if event.key == pygame.K_g:
@@ -734,6 +768,8 @@ def run_replay(drivers_data, bounds, timeline, metadata):
                     trails = {drv: [] for drv in drivers_data}
                     row_positions = {}
                     delta_history = []
+                    previous_order = []
+                    active_overtakes = []
 
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 mx, my = pygame.mouse.get_pos()
@@ -742,6 +778,8 @@ def run_replay(drivers_data, bounds, timeline, metadata):
                     time_val = ratio * total_time
                     trails = {drv: [] for drv in drivers_data}
                     delta_history = []
+                    previous_order = []
+                    active_overtakes = []
                 else:
                     pending_click = (mx, my, bool(pygame.key.get_mods() & pygame.KMOD_SHIFT))
 
@@ -751,6 +789,8 @@ def run_replay(drivers_data, bounds, timeline, metadata):
                 time_val = timeline[0]
                 trails = {drv: [] for drv in drivers_data}
                 delta_history = []
+                previous_order = []
+                active_overtakes = []
 
         time_val = max(timeline[0], min(time_val, total_time))
 
@@ -803,6 +843,25 @@ def run_replay(drivers_data, bounds, timeline, metadata):
         if current_frame_data:
             current_frame_data.sort(key=lambda x: x["dist"], reverse=True)
             leaderboard_order = [d["id"] for d in current_frame_data]
+
+            # --- OVERTAKE DETECTION ---
+            if previous_order:
+                for new_pos, drv in enumerate(leaderboard_order):
+                    if drv in previous_order:
+                        old_pos = previous_order.index(drv)
+                        if new_pos < old_pos:
+                            for passed_drv in previous_order[new_pos:old_pos]:
+                                if passed_drv in leaderboard_order:
+                                    if not frame_by_driver[drv]["in_pit"] and not frame_by_driver[passed_drv]["in_pit"]:
+                                        # Verify they are physically close to prevent glitch overtakes
+                                        if abs(frame_by_driver[drv]["dist"] - frame_by_driver[passed_drv]["dist"]) < 150:
+                                            active_overtakes.append({
+                                                "attacker": drv,
+                                                "defender": passed_drv,
+                                                "time": time_val
+                                            })
+            previous_order = leaderboard_order.copy()
+            active_overtakes = [o for o in active_overtakes if 0 <= time_val - o["time"] < 4.0]
 
             leader_dist = current_frame_data[0]["dist"]
             current_lap = current_frame_data[0]["lap"]
@@ -973,6 +1032,32 @@ def run_replay(drivers_data, bounds, timeline, metadata):
                 drs_drivers,
                 row_positions
             )
+
+            # Draw Overtake Notifications
+            if active_overtakes:
+                ot_font = pygame.font.SysFont("Consolas", 14, bold=True)
+                ot_y = screen_h - SEEK_BAR_HEIGHT - 90
+                # Draw unique overtakes in the last 4 seconds
+                drawn_pairs = set()
+                for o in reversed(active_overtakes):
+                    pair = (o["attacker"], o["defender"])
+                    if pair in drawn_pairs: continue
+                    drawn_pairs.add(pair)
+                    
+                    att = driver_info[o["attacker"]]["Abbreviation"]
+                    def_ = driver_info[o["defender"]]["Abbreviation"]
+                    text = f"OVERTAKE: {att} ➔ {def_}"
+                    surf = ot_font.render(text, True, (255, 255, 255))
+                    bg_rect = surf.get_rect(right=screen_w - SIDEBAR_WIDTH - 20, bottom=ot_y)
+                    
+                    # Create a slightly transparent background using an alpha surface
+                    bg_surf = pygame.Surface((bg_rect.w + 16, bg_rect.h + 12), pygame.SRCALPHA)
+                    pygame.draw.rect(bg_surf, (30, 140, 60, 220), bg_surf.get_rect(), border_radius=6)
+                    pygame.draw.rect(bg_surf, (80, 255, 120, 200), bg_surf.get_rect(), width=1, border_radius=6)
+                    
+                    screen.blit(bg_surf, (bg_rect.x - 8, bg_rect.y - 6))
+                    screen.blit(surf, bg_rect)
+                    ot_y -= 40
 
         pygame.display.flip()
         clock.tick(60)
