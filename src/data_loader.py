@@ -105,10 +105,11 @@ def adaptive_dropout_threshold(dists: np.ndarray) -> float:
 
 def compute_lateral_g(df: pd.DataFrame) -> pd.Series:
     if "Time" not in df.columns or "X" not in df.columns or "Y" not in df.columns:
-        return pd.Series(0, index=df.index)
+        return pd.Series(0.0, index=df.index)
     
     t = df["Time"]
     dt_raw = t.diff()
+    # Handle both timedelta and float (seconds) Time columns
     if hasattr(dt_raw, "dt"):
         dt = dt_raw.dt.total_seconds().replace(0, np.nan)
     else:
@@ -119,8 +120,18 @@ def compute_lateral_g(df: pd.DataFrame) -> pd.Series:
     ax = vx.diff() / dt
     ay = vy.diff() / dt
     speed_sq = vx**2 + vy**2
-    lateral_g = (vx * ay - vy * ax).abs() / speed_sq.replace(0, np.nan) / 9.81
-    return lateral_g.fillna(0)
+
+    # Minimum speed threshold: below 5 m/s (pit lane / standing start)
+    # the formula produces garbage — zero it out
+    speed_sq_safe = speed_sq.where(speed_sq > 25.0, other=np.nan)
+
+    lateral_g = (vx * ay - vy * ax).abs() / speed_sq_safe / 9.81
+
+    # F1 cars physically cap at ~6G lateral cornering force.
+    # Any value above this is a GPS artifact — clip it.
+    lateral_g = lateral_g.clip(0.0, 6.0)
+
+    return lateral_g.fillna(0.0)
 
 def compute_overall_sector_bests(laps):
     sector_bests = {}
