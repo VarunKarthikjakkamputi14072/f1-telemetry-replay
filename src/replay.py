@@ -1209,7 +1209,7 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
     delta_history = deque(maxlen=240)
 
     drv_colors = {drv: parse_team_color(info["TeamColor"]) for drv, info in driver_info.items()}
-    trails = {drv: [] for drv in drivers_data}
+    trails = {drv: deque(maxlen=TRAIL_LENGTH) for drv in drivers_data}
     row_positions = {}
     previous_order = []
     active_overtakes = []
@@ -1292,7 +1292,7 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
                 if event.key == pygame.K_r:
                     time_val = timeline[0]
                     invalidate_fastest_lap_cache()
-                    trails = {drv: [] for drv in drivers_data}
+                    trails = {drv: deque(maxlen=TRAIL_LENGTH) for drv in drivers_data}
                     row_positions = {}
                     delta_history.clear()
                     previous_order = []
@@ -1305,7 +1305,7 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
                     ratio = mx / screen_w
                     time_val = ratio * total_time
                     invalidate_fastest_lap_cache()
-                    trails = {drv: [] for drv in drivers_data}
+                    trails = {drv: deque(maxlen=TRAIL_LENGTH) for drv in drivers_data}
                     delta_history.clear()
                     previous_order = []
                     active_overtakes = []
@@ -1324,7 +1324,7 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
             if time_val > total_time:
                 time_val = timeline[0]
                 invalidate_fastest_lap_cache()
-                trails = {drv: [] for drv in drivers_data}
+                trails = {drv: deque(maxlen=TRAIL_LENGTH) for drv in drivers_data}
                 delta_history.clear()
                 previous_order = []
                 active_overtakes = []
@@ -1349,8 +1349,6 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
             in_pit = state["Speed"] < 5 and (in_pit_window or not info.get("PitWindows")) and time_val > timeline[0] + 2
 
             trails[drv_code].append((gx, gy, state["Speed"]))
-            if len(trails[drv_code]) > TRAIL_LENGTH:
-                trails[drv_code].pop(0)
 
             frame_state = {
                 "id": drv_code,
