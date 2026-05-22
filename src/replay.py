@@ -142,6 +142,31 @@ def is_in_pit_window(info, t):
     return any(window["start"] <= t <= window["end"] for window in info.get("PitWindows", []))
 
 
+_fl_cache = {"t": -1.0, "driver": None, "lap_time": None, "personal_bests": {}}
+_fl_next_event_t = 0.0
+
+def get_live_fastest_lap_cached(driver_info, t):
+    global _fl_cache, _fl_next_event_t
+    if t >= _fl_cache["t"] and t < _fl_next_event_t:
+        return _fl_cache["driver"], _fl_cache["lap_time"], _fl_cache["personal_bests"]
+
+    driver, lap_time, personal_bests = get_live_fastest_lap(driver_info, t)
+    _fl_cache = {"t": t, "driver": driver, "lap_time": lap_time, "personal_bests": personal_bests}
+
+    next_t = float("inf")
+    for info in driver_info.values():
+        for event in info.get("LapEvents", []):
+            et = event.get("time", 0)
+            if et > t:
+                next_t = min(next_t, et)
+    _fl_next_event_t = next_t if next_t < float("inf") else t + 3600.0
+    return driver, lap_time, personal_bests
+
+def invalidate_fastest_lap_cache():
+    global _fl_cache, _fl_next_event_t
+    _fl_cache = {"t": -1.0, "driver": None, "lap_time": None, "personal_bests": {}}
+    _fl_next_event_t = 0.0
+
 def get_live_fastest_lap(driver_info, t):
     fastest_driver = None
     fastest_lap_time = None
@@ -1204,11 +1229,13 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
                     speed = max(speed - 0.5, 0.0)
                 if event.key == pygame.K_RIGHT:
                     time_val += 5.0
+                    invalidate_fastest_lap_cache()
                     previous_order = []
                     active_overtakes = []
                     ot_cooldowns = {}
                 if event.key == pygame.K_LEFT:
                     time_val -= 5.0
+                    invalidate_fastest_lap_cache()
                     previous_order = []
                     active_overtakes = []
                     ot_cooldowns = {}
@@ -1229,6 +1256,7 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
                     delta_history.clear()
                 if event.key == pygame.K_r:
                     time_val = timeline[0]
+                    invalidate_fastest_lap_cache()
                     trails = {drv: [] for drv in drivers_data}
                     row_positions = {}
                     delta_history.clear()
@@ -1241,6 +1269,7 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
                 if my > screen_h - SEEK_BAR_HEIGHT:
                     ratio = mx / screen_w
                     time_val = ratio * total_time
+                    invalidate_fastest_lap_cache()
                     trails = {drv: [] for drv in drivers_data}
                     delta_history.clear()
                     previous_order = []
@@ -1259,6 +1288,7 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
             time_val += dt * speed
             if time_val > total_time:
                 time_val = timeline[0]
+                invalidate_fastest_lap_cache()
                 trails = {drv: [] for drv in drivers_data}
                 delta_history.clear()
                 previous_order = []
@@ -1355,7 +1385,7 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
             if current_lap == 0:
                 current_lap = int(leader_dist / track_length_approx) + 1
 
-            fastest_driver, fastest_lap_time, _ = get_live_fastest_lap(driver_info, time_val)
+            fastest_driver, fastest_lap_time, _ = get_live_fastest_lap_cached(driver_info, time_val)
 
             gaps = {}
             intervals = {}
