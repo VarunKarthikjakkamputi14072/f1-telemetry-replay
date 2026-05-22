@@ -643,62 +643,97 @@ def draw_dashboard(
         name_surf = name_font.render(info["Abbreviation"], True, text_col)
         screen.blit(name_surf, (panel_x + 50, y_pos + 8))
 
+        # --- Tyre compound + age ---
         drv_lap = int(frame_by_driver[drv_id]["lap"])
         lap_stints = info.get("LapStints", {})
-        
+
         stint = lap_stints.get(drv_lap)
         if not stint and lap_stints:
             past = [k for k in lap_stints if k <= drv_lap]
             key = max(past) if past else min(lap_stints)
             stint = lap_stints[key]
-        elif not stint:
+        if not stint:
             stint = {}
-            
-        compound = str(stint.get("Compound", "HARD")).upper()
+
+        # FIX C: always normalise compound at render time
+        compound = str(stint.get("Compound", "UNKNOWN")).upper().strip()
+        if compound in ("NAN", "NONE", ""):
+            compound = "UNKNOWN"
+
         stint_start = stint.get("StintStartLap", drv_lap)
-        tyre_life = max(1, drv_lap - stint_start + 1) if lap_stints else int(stint.get("TyreLife", 0))
-        
-        dot_x = panel_x + 94
-        # Tyre health ring with degradation model
-        _health_pct = 100
+        if lap_stints:
+            # Live computed age — never frozen, always correct
+            tyre_life = max(1, drv_lap - stint_start + 1)
+        else:
+            # FIX B: fallback to 1 (full health) not 0 (dead tyre)
+            tyre_life = max(1, int(stint.get("TyreLife", 1)))
+
+        # --- Tyre health calculation ---
         if _tyre_model_global and _tyre_model_global.fitted:
             _h = _tyre_model_global.get_health(compound, int(tyre_life))
             _health_pct = _h["health"]
+            _cliff = _h["cliff_warning"]
         else:
-            _health_pct = max(0, int(100 - tyre_life * 2.5))
-        draw_tyre_health_ring(screen, dot_x, y_pos + 15, 8, _health_pct, compound)
-        val_font = get_font("Consolas", 11, bold=True)
-        life_surf = val_font.render(f"{tyre_life}L", True, SUBTEXT_COLOR)
-        screen.blit(life_surf, (dot_x + 13, y_pos + 10))
-        
-        badge_x = dot_x + 36
-        
+            max_stints = {"SOFT": 22, "MEDIUM": 34, "HARD": 50,
+                          "INTERMEDIATE": 30, "WET": 25}
+            max_s = max_stints.get(compound, 30)
+            _health_pct = max(0, int(100 - (tyre_life / max_s) * 100))
+            _cliff = _health_pct < 20
+
+        # --- Badges (overtake arrow, crown, PIT, DRS) ---
+        # badge_x flows left-to-right starting after the driver name
+        badge_x = panel_x + 94
+
         if ot_attacker:
             tri_x = badge_x + 6
             tri_y = y_pos + 17
-            pygame.draw.polygon(screen, (80, 255, 120), [(tri_x, tri_y-5), (tri_x-5, tri_y+4), (tri_x+5, tri_y+4)])
+            pygame.draw.polygon(screen, (80, 255, 120),
+                                [(tri_x, tri_y-5), (tri_x-5, tri_y+4), (tri_x+5, tri_y+4)])
             badge_x += 18
         elif ot_defender:
             tri_x = badge_x + 6
             tri_y = y_pos + 17
-            pygame.draw.polygon(screen, (255, 80, 80), [(tri_x, tri_y+4), (tri_x-5, tri_y-5), (tri_x+5, tri_y-5)])
+            pygame.draw.polygon(screen, (255, 80, 80),
+                                [(tri_x, tri_y+4), (tri_x-5, tri_y-5), (tri_x+5, tri_y-5)])
             badge_x += 18
 
         if drv_id == fastest_driver:
             crown_surf = name_font.render("♕", True, FASTEST_PURPLE)
             screen.blit(crown_surf, (badge_x, y_pos + 6))
             badge_x += 26
+
         if drv_id in pit_drivers:
             flash = 0.5 + 0.5 * math.sin(t * 8)
             pit_color = lerp_color((120, 80, 10), PIT_YELLOW, flash)
             pit_dur = pit_drivers[drv_id]
             if pit_dur < 120:
-                badge_rect = draw_badge(screen, f"PIT {pit_dur:.1f}s", font_badge, badge_x, y_pos + 9, (30, 20, 0), pit_color)
+                badge_rect = draw_badge(screen, f"PIT {pit_dur:.1f}s",
+                                        font_badge, badge_x, y_pos + 9,
+                                        (30, 20, 0), pit_color)
             else:
-                badge_rect = draw_badge(screen, "OUT", font_badge, badge_x, y_pos + 9, (30, 0, 0), (255, 60, 60))
+                badge_rect = draw_badge(screen, "OUT", font_badge,
+                                        badge_x, y_pos + 9,
+                                        (30, 0, 0), (255, 60, 60))
             badge_x = badge_rect.right + 4
+
         if drv_id in drs_drivers:
-            draw_badge(screen, "DRS", font_badge, badge_x, y_pos + 9, (0, 40, 8), DRS_GREEN)
+            draw_badge(screen, "DRS", font_badge, badge_x, y_pos + 9,
+                       (0, 40, 8), DRS_GREEN)
+
+        # FIX A: Tyre ring + life label pinned to a FIXED position from
+        # the right edge of the row — badges can never overlap it.
+        tyre_ring_x = panel_x + panel_w - 46   # fixed slot, right-aligned
+        tyre_ring_y = y_pos + row_h // 2
+
+        # Optional cliff warning: flash ring red when near the cliff
+        ring_compound = compound if not _cliff else "SOFT"
+        draw_tyre_health_ring(screen, tyre_ring_x, tyre_ring_y, 8,
+                              _health_pct, ring_compound)
+
+        val_font = get_font("Consolas", 11, bold=True)
+        life_color = (255, 80, 80) if _cliff else SUBTEXT_COLOR
+        life_surf = val_font.render(f"{tyre_life}L", True, life_color)
+        screen.blit(life_surf, (tyre_ring_x + 11, tyre_ring_y - 6))
 
         metric = intervals if gap_mode == "interval" else gaps
         gap_val = metric.get(drv_id, 0)
