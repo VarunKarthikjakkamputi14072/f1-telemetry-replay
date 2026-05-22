@@ -407,8 +407,22 @@ def load_race(year: int, race_name: str):
         
         # --- ADAPTIVE DROPOUT GUARD ---
         threshold = adaptive_dropout_threshold(dists)
-        dists[dists > threshold] = 0
-        df["CumDist"] = np.cumsum(dists)
+        clean_mask = dists <= threshold
+ 
+        # Estimate track length from clean (non-dropout) segments only.
+        # Use the median lap's worth of clean distance to avoid outliers.
+        lap_nums = df["LapNumber"].values
+        max_lap = int(lap_nums.max()) if len(lap_nums) > 0 else 1
+        clean_dists = dists.copy()
+        clean_dists[~clean_mask] = 0
+        total_clean_dist = float(np.sum(clean_dists))
+        track_length_est = total_clean_dist / max(max_lap, 1)
+ 
+        # Build monotonic CumDist: raw cumsum of clean segments
+        # + lap_number * track_length so it never resets
+        raw_cumdist = np.cumsum(clean_dists)
+        lap_offset = (lap_nums - lap_nums[0]) * track_length_est
+        df["CumDist"] = raw_cumdist + lap_offset
 
     print("⚙️ Computing driver similarity matrix...")
     similarity_matrix = build_driver_fingerprint(drivers_data)
