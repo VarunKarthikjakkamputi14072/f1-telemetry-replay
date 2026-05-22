@@ -300,21 +300,41 @@ def load_race(year: int, race_name: str):
             if "Compound" in laps.columns and "TyreLife" in laps.columns:
                 prev_compound = None
                 stint_start_lap = 1
-                for _, lap_row in laps.iterrows():
-                    lap_num = int(lap_row.get("LapNumber", 0)) if not pd.isna(lap_row.get("LapNumber")) else 0
-                    if not pd.isna(lap_row.get("Compound")):
-                        compound = str(lap_row["Compound"])
-                        tyre_life_val = float(lap_row.get("TyreLife", 0))
-                        
-                        if tyre_life_val == 1 or prev_compound != compound:
-                            stint_start_lap = lap_num
-                            
-                        lap_stints[lap_num] = {
-                            "Compound": compound,
-                            "TyreLife": tyre_life_val,
-                            "StintStartLap": stint_start_lap
-                        }
-                        prev_compound = compound
+
+                # Sort by LapNumber to guarantee chronological processing
+                for _, lap_row in laps.sort_values("LapNumber").iterrows():
+                    raw_lap_num = lap_row.get("LapNumber", 0)
+                    lap_num = int(raw_lap_num) if not pd.isna(raw_lap_num) else 0
+
+                    raw_compound = lap_row.get("Compound")
+                    if pd.isna(raw_compound):
+                        # Carry forward previous compound rather than skipping row
+                        if prev_compound and lap_num > 0:
+                            prev_stint = lap_stints.get(lap_num - 1, {})
+                            lap_stints[lap_num] = {
+                                "Compound": prev_compound,
+                                "TyreLife": prev_stint.get("TyreLife", 0) + 1,
+                                "StintStartLap": stint_start_lap,
+                            }
+                        continue
+
+                    # NORMALISE to uppercase — fixes Soft/SOFT/soft across seasons
+                    compound = str(raw_compound).upper().strip()
+
+                    tyre_life_val = float(lap_row.get("TyreLife", 0)) if not pd.isna(lap_row.get("TyreLife")) else 0.0
+
+                    # Stint start = compound change (primary) OR TyreLife reset to 1 (secondary)
+                    compound_changed = prev_compound is not None and compound != prev_compound
+                    tyre_reset = tyre_life_val <= 1.0
+                    if prev_compound is None or compound_changed or tyre_reset:
+                        stint_start_lap = lap_num
+
+                    lap_stints[lap_num] = {
+                        "Compound": compound,           # always UPPER now
+                        "TyreLife": tyre_life_val,
+                        "StintStartLap": stint_start_lap,
+                    }
+                    prev_compound = compound
 
             driver_info[driver] = {
                 "Abbreviation": drv_details["Abbreviation"],
