@@ -4,6 +4,7 @@ Tyre degradation model — estimates tyre health from stint data.
 Uses a compound-specific exponential decay model fitted from actual session
 lap times.  Falls back to tuned priors when data is sparse.
 """
+import math
 import numpy as np
 import pandas as pd
 from typing import Dict, Optional, Tuple
@@ -67,14 +68,28 @@ class TyreDegradationModel:
                 self._profiles[cname] = dict(prior)
                 continue
 
-            # Linear fit of lap_time vs tyre_life to get degradation slope
+            # FIX 2: Filter outlier laps (SC/VSC/formation) before fitting.
+            # Keep only laps within 110% of the median lap time.
+            median_lap = float(np.median(lap_secs))
+            clean_mask = lap_secs <= median_lap * 1.10
+            lap_secs_clean = lap_secs[clean_mask]
+            tyre_life_clean = tyre_life[clean_mask]
+
+            if len(lap_secs_clean) < 3:
+                # Not enough clean laps — fall back to prior
+                self._profiles[cname] = dict(prior)
+                continue
+
             try:
-                coeffs = np.polyfit(tyre_life, lap_secs, 1)
+                coeffs = np.polyfit(tyre_life_clean, lap_secs_clean, 1)
                 deg_rate = max(0.005, float(coeffs[0]))
             except Exception:
                 deg_rate = prior["deg"]
 
-            max_stint = int(tyre_life.max()) if len(tyre_life) > 0 else prior["max_stint"]
+            # Cap deg_rate at 3× the prior to prevent SC-corrupted fits
+            deg_rate = min(deg_rate, prior["deg"] * 3.0)
+
+            max_stint = int(tyre_life_clean.max()) if len(tyre_life_clean) > 0 else prior["max_stint"]
 
             self._profiles[cname] = {
                 "deg": deg_rate,
@@ -91,35 +106,35 @@ class TyreDegradationModel:
         return True
 
     def get_health(self, compound: str, laps_on_tyre: int) -> dict:
-        """Return health info for a given compound and stint age.
-
-        Returns dict with keys: health (0-100), deg_rate, expected_delta,
-        cliff_warning.
-        """
-        cname = str(compound).upper()
-        profile = self._profiles.get(cname, _COMPOUND_PRIORS.get(cname, _COMPOUND_PRIORS["MEDIUM"]))
+        """Return health info for a given compound and stint age."""
+        cname = str(compound).upper().strip()
+        profile = self._profiles.get(
+            cname, _COMPOUND_PRIORS.get(cname, _COMPOUND_PRIORS["MEDIUM"])
+        )
 
         deg = profile["deg"]
         max_stint = profile["max_stint"]
         warmup = profile["warmup"]
 
-        # Exponential health decay
         age = max(0, laps_on_tyre)
-        raw_health = 100.0 * np.exp(-0.03 * deg * age * age / max(max_stint, 1))
 
-        # Linear component for realism
-        linear_loss = (age / max(max_stint, 1)) * 60
-        health = max(0, min(100, raw_health - linear_loss))
+        # FIX 1: Pure exponential decay only.
+        # k is tuned so that health reaches ~20% at max_stint.
+        # Solving: 0.20 = exp(-k * max_stint)  →  k = ln(5) / max_stint
+        k = math.log(5.0) / max(max_stint, 1)
+        health = 100.0 * math.exp(-k * age)
+        health = max(0.0, min(100.0, health))
 
-        # Expected time penalty vs fresh tyre
+        # Warmup penalty: first 2 laps cost extra time (cold tyres)
         expected_delta = deg * age
         if age <= 2:
-            expected_delta += warmup * (1 - age / 2)
+            expected_delta += warmup * (1.0 - age / 2.0)
 
-        cliff_warning = health < 20 or age > max_stint * 0.85
+        # FIX 3: Single cliff condition — don't fire from two paths
+        cliff_warning = age >= max_stint * 0.82   # ~82% of max stint
 
         return {
-            "health": int(health),
+            "health": int(round(health)),
             "deg_rate": round(deg, 4),
             "expected_delta": round(expected_delta, 2),
             "cliff_warning": cliff_warning,
