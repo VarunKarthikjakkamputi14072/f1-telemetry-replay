@@ -1,7 +1,10 @@
+import os
 import pygame
 import sys
 import numpy as np
 from collections import deque
+
+from recorder import ClipRecorder
 
 # ---------------------------------------------------------------------------
 # Visual configuration
@@ -393,7 +396,7 @@ def draw_dashboard(screen, font, t, speed, driver_info, leaderboard_order,
     # Mode indicator hints
     hint_font = pygame.font.SysFont("Consolas", 11)
     mode_text = f"[G] {'Interval' if gap_mode == 'interval' else 'Gap to Leader'}"
-    mode_text += "  [H] Heatmap  [D] DRS  [T] Telemetry"
+    mode_text += "  [H] Heatmap  [D] DRS  [T] Telemetry  [C] Clip"
     if focused_driver:
         abbr = driver_info.get(focused_driver, {}).get("Abbreviation", "???")
         mode_text += f"  | Focus: {abbr} (click to release)"
@@ -507,6 +510,13 @@ def run_replay(drivers_data, bounds, timeline, metadata):
         trails = {drv: deque(maxlen=TRAIL_LENGTH) for drv in drivers_data}
         trail_speeds = {drv: deque(maxlen=TRAIL_LENGTH) for drv in drivers_data}
 
+    # Clip recorder — writes shareable MP4/GIF highlights to <root>/clips.
+    clips_dir = os.path.join(os.path.dirname(__file__), os.pardir, "clips")
+    recorder = ClipRecorder(out_dir=clips_dir, prefix="f1_replay")
+    saved_msg = None
+    saved_msg_until = 0.0
+    rec_font = pygame.font.SysFont("Consolas", 14, bold=True)
+
     while running:
         screen.fill(BG_COLOR)
         dt = clock.get_time() / 1000.0
@@ -548,6 +558,15 @@ def run_replay(drivers_data, bounds, timeline, metadata):
                     show_drs = not show_drs
                 elif event.key == pygame.K_t:
                     show_telemetry = not show_telemetry
+                elif event.key == pygame.K_c:
+                    if recorder.available:
+                        path = recorder.toggle()
+                        if path:
+                            saved_msg = f"Saved {os.path.basename(path)}"
+                            saved_msg_until = pygame.time.get_ticks() + 4000
+                    else:
+                        saved_msg = "Install imageio to record clips"
+                        saved_msg_until = pygame.time.get_ticks() + 4000
 
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 mx, my = pygame.mouse.get_pos()
@@ -747,6 +766,26 @@ def run_replay(drivers_data, bounds, timeline, metadata):
         expired = [k for k, v in sector_flashes.items() if time_val >= v[1]]
         for k in expired:
             del sector_flashes[k]
+
+        # ---- Clip capture (before overlay, so the REC badge isn't in the clip) ----
+        if recorder.recording:
+            if recorder.capture(screen):
+                path = recorder.stop()  # hit the length cap -> auto-save
+                if path:
+                    saved_msg = f"Saved {os.path.basename(path)}"
+                    saved_msg_until = pygame.time.get_ticks() + 4000
+
+        # ---- Recording / saved overlay (screen-only) ----
+        now_ms = pygame.time.get_ticks()
+        if recorder.recording:
+            pygame.draw.circle(screen, (235, 50, 50), (24, 60), 7)
+            rec_text = rec_font.render(
+                f"REC  {recorder.seconds:4.1f}s   [C] stop",
+                True, (235, 80, 80))
+            screen.blit(rec_text, (38, 52))
+        elif saved_msg and now_ms < saved_msg_until:
+            saved_surf = rec_font.render(saved_msg, True, (90, 220, 120))
+            screen.blit(saved_surf, (20, 52))
 
         pygame.display.flip()
         clock.tick(60)

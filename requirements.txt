@@ -1,0 +1,5 @@
+fastf1==3.7.0
+pygame==2.6.1
+numpy==2.0.2
+imageio==2.34.2
+imageio-ffmpeg==0.5.1
