@@ -1,1160 +1,435 @@
 import pygame
-
-_FONTS = {}
-def get_font(name, size, bold=False):
-    key = (name, size, bold)
-    if key not in _FONTS:
-        _FONTS[key] = pygame.font.SysFont(name, size, bold=bold)
-    return _FONTS[key]
 import sys
 import numpy as np
-import math
 from collections import deque
-from track_geo import (compute_circuit_rotation, compute_track_normals,
-                       build_track_edges, rotate_point, label_offset_from_normal)
-from tyre_model import compound_color as tyre_compound_color
 
-# --- Visual Configuration ---
+# ---------------------------------------------------------------------------
+# Visual configuration
+# ---------------------------------------------------------------------------
 BG_COLOR = (13, 13, 17)
 TRACK_COLOR = (60, 60, 70)
 TRACK_OUTLINE = (20, 20, 25)
 TEXT_COLOR = (240, 240, 240)
-SUBTEXT_COLOR = (150, 150, 150)
 UI_BG = (22, 25, 30)
 UI_BORDER = (55, 60, 70)
-ACCENT_BLUE = (100, 200, 255)
-DRS_GREEN = (90, 255, 120)
-PIT_YELLOW = (255, 205, 80)
-FASTEST_PURPLE = (190, 90, 255)
-SECTOR_GREEN = (80, 255, 120)
-SECTOR_FLASH_DURATION = 1.5
-SECTOR_FLASH_COLORS = {
-    "overall_best": FASTEST_PURPLE,
-    "personal_best": SECTOR_GREEN,
-    "normal": PIT_YELLOW
-}
-TRAIL_LENGTH = 28
-SIDEBAR_WIDTH = 260
-_tyre_model_global = None
-HEADER_HEIGHT = 76
-SEEK_BAR_HEIGHT = 20
+TRAIL_LENGTH = 25
 
-_COMPOUND_COLORS = {
-    "SOFT": (220, 40, 40), "MEDIUM": (220, 190, 30),
-    "HARD": (240, 240, 240), "INTERMEDIATE": (60, 180, 60), "WET": (60, 100, 220),
-    "HYPERSOFT": (255, 105, 180), "ULTRASOFT": (138, 43, 226), "SUPERSOFT": (255, 69, 0),
-    "UNKNOWN": (150, 150, 150), "nan": (150, 150, 150)
-}
+PURPLE = (170, 0, 255)
+GREEN = (0, 230, 70)
+YELLOW = (255, 230, 0)
 
-def tyre_compound_color(name):
-    return _COMPOUND_COLORS.get(str(name).upper().strip(), (150, 150, 150))
+HEATMAP_COLD = (30, 80, 220)
+HEATMAP_MID = (50, 220, 50)
+HEATMAP_HOT = (240, 50, 30)
 
 
-
-def clamp(value, low, high):
-    return max(low, min(value, high))
-
-
-def lerp(a, b, alpha):
-    return a + (b - a) * alpha
+def _lerp(a, b, t):
+    return a + (b - a) * max(0.0, min(1.0, t))
 
 
-def lerp_color(a, b, alpha):
-    alpha = clamp(alpha, 0.0, 1.0)
-    return tuple(int(lerp(a[i], b[i], alpha)) for i in range(3))
-
-def catmull_rom(p0, p1, p2, p3, alpha):
-    t = alpha
-    q = (
-        (-t**3 + 2*t**2 - t) / 2 * p0 +
-        (3*t**3 - 5*t**2 + 2) / 2 * p1 +
-        (-3*t**3 + 4*t**2 + t) / 2 * p2 +
-        (t**3 - t**2) / 2 * p3
+def _lerp_color(c1, c2, t):
+    return (
+        int(_lerp(c1[0], c2[0], t)),
+        int(_lerp(c1[1], c2[1], t)),
+        int(_lerp(c1[2], c2[2], t)),
     )
-    return q
 
 
-def muted_color(color, amount=0.2):
-    return lerp_color(BG_COLOR, color, amount)
+def speed_to_color(ratio):
+    """Map 0..1 speed ratio to a cool-to-hot colour."""
+    if ratio < 0.5:
+        return _lerp_color(HEATMAP_COLD, HEATMAP_MID, ratio * 2)
+    return _lerp_color(HEATMAP_MID, HEATMAP_HOT, (ratio - 0.5) * 2)
 
 
-def safe_float(value, default=0.0):
-    try:
-        if value is None:
-            return default
-        number = float(value)
-        if math.isnan(number) or math.isinf(number):
-            return default
-        return number
-    except Exception:
-        return default
-
-
-def parse_team_color(value):
-    try:
-        c_hex = value.lstrip("#")
-        return tuple(int(c_hex[i:i + 2], 16) for i in (0, 2, 4))
-    except Exception:
-        return (200, 200, 200)
-
-
-def speed_to_color(speed, max_speed):
-    ratio = clamp(speed / max(max_speed, 1.0), 0.0, 1.0)
-    if ratio < 0.4:
-        return lerp_color((50, 100, 255), (50, 230, 255), ratio / 0.4)
-    if ratio < 0.75:
-        return lerp_color((50, 230, 255), (255, 220, 80), (ratio - 0.4) / 0.35)
-    return lerp_color((255, 220, 80), (255, 70, 70), (ratio - 0.75) / 0.25)
-
-
-def trail_width(speed, max_speed):
-    ratio = clamp(speed / max(max_speed, 1.0), 0.0, 1.0)
-    return max(1, int(round(lerp(1, 5, ratio))))
-
-
-def get_sector_flash(info, t):
-    active_event = None
-    for event in info.get("SectorEvents", []):
-        age = t - event.get("time", -9999)
-        if 0 <= age <= SECTOR_FLASH_DURATION:
-            if active_event is None or event["time"] > active_event["time"]:
-                active_event = event
-
-    if not active_event:
-        return None
-
-    event_type = active_event.get("type", "normal")
-    label = {
-        "overall_best": "BEST",
-        "personal_best": "PB",
-        "normal": "SEC"
-    }.get(event_type, "SEC")
-
-    return {
-        "color": SECTOR_FLASH_COLORS.get(event_type, PIT_YELLOW),
-        "label": f"S{active_event.get('sector', '')} {label}",
-        "type": event_type,
-        "age": t - active_event["time"]
-    }
-
-
-def is_in_pit_window(info, t):
-    return any(window["start"] <= t <= window["end"] for window in info.get("PitWindows", []))
-
-
-_fl_cache = {"t": -1.0, "driver": None, "lap_time": None, "personal_bests": {}}
-_fl_next_event_t = 0.0
-
-def get_live_fastest_lap_cached(driver_info, t):
-    global _fl_cache, _fl_next_event_t
-    if t >= _fl_cache["t"] and t < _fl_next_event_t:
-        return _fl_cache["driver"], _fl_cache["lap_time"], _fl_cache["personal_bests"]
-
-    driver, lap_time, personal_bests = get_live_fastest_lap(driver_info, t)
-    _fl_cache = {"t": t, "driver": driver, "lap_time": lap_time, "personal_bests": personal_bests}
-
-    next_t = float("inf")
-    for info in driver_info.values():
-        for event in info.get("LapEvents", []):
-            et = event.get("time", 0)
-            if et > t:
-                next_t = min(next_t, et)
-    _fl_next_event_t = next_t if next_t < float("inf") else t + 3600.0
-    return driver, lap_time, personal_bests
-
-def invalidate_fastest_lap_cache():
-    global _fl_cache, _fl_next_event_t
-    _fl_cache = {"t": -1.0, "driver": None, "lap_time": None, "personal_bests": {}}
-    _fl_next_event_t = 0.0
-
-def get_live_fastest_lap(driver_info, t):
-    fastest_driver = None
-    fastest_lap_time = None
-    personal_bests = {}
-
-    for drv_id, info in driver_info.items():
-        best_time = None
-        for event in info.get("LapEvents", []):
-            if event.get("time", 0) > t:
-                continue
-
-            lap_time = event.get("lap_time")
-            if lap_time is not None and (best_time is None or lap_time < best_time):
-                best_time = lap_time
-
-        if best_time is not None:
-            personal_bests[drv_id] = best_time
-            if fastest_lap_time is None or best_time < fastest_lap_time:
-                fastest_driver = drv_id
-                fastest_lap_time = best_time
-
-    return fastest_driver, fastest_lap_time, personal_bests
-
-
-def is_drs_active(value):
-    return safe_float(value) >= 10.0
-
-
-def format_lap_time(seconds):
-    if seconds is None:
-        return "--:--.---"
-    minutes = int(seconds // 60)
-    secs = seconds % 60
-    return f"{minutes}:{secs:06.3f}"
-
-
-def draw_badge(screen, text, font, x, y, fg, bg):
-    surf = font.render(text, True, fg)
-    rect = pygame.Rect(x, y, surf.get_width() + 10, surf.get_height() + 4)
-    pygame.draw.rect(screen, bg, rect, border_radius=5)
-    screen.blit(surf, (rect.x + 5, rect.y + 2))
-    return rect
-
-
+# ---------------------------------------------------------------------------
+# Coordinate helpers
+# ---------------------------------------------------------------------------
 def scale_point(x, y, bounds, screen_size):
     min_x, max_x, min_y, max_y = bounds
     width, height = screen_size
 
     padding_x = 60
-    padding_top = HEADER_HEIGHT + 28
-    padding_bottom = 126
+    padding_y = 90
+    sidebar_width = 240
 
-    avail_w = width - (padding_x * 2) - SIDEBAR_WIDTH
-    avail_h = height - padding_top - padding_bottom
+    avail_w = width - (padding_x * 2) - sidebar_width
+    avail_h = height - (padding_y * 2)
 
     range_x = max(1.0, max_x - min_x)
     range_y = max(1.0, max_y - min_y)
 
     sx = int((x - min_x) / range_x * avail_w) + padding_x
-    sy_from_bottom = int((y - min_y) / range_y * avail_h) + padding_bottom
-    return sx, height - sy_from_bottom
+    sy = int((y - min_y) / range_y * avail_h) + padding_y
+    return sx, height - sy
 
 
-def build_track_segments(drivers_data, bounds, screen_size):
+def build_track_points(drivers_data, bounds, screen_size):
     if not drivers_data:
-        return []
-
+        return [], []
     try:
-        reference_df = max(drivers_data.values(), key=len)
+        best_driver = max(drivers_data.items(), key=lambda x: len(x[1]))[1]
     except ValueError:
-        return []
+        return [], []
 
-    segments = []
-    last_p = None
-    
-    for i in range(len(reference_df) - 1):
-        row = reference_df.iloc[i]
-        next_row = reference_df.iloc[i + 1]
-        
-        # Prevent straight-line anomalies from telemetry dropouts
-        dx = next_row["X"] - row["X"]
-        dy = next_row["Y"] - row["Y"]
-        if math.hypot(dx, dy) > 150:
-            last_p = None
-            continue
-            
-        p1 = scale_point(row["X"], row["Y"], bounds, screen_size)
-        p2 = scale_point(next_row["X"], next_row["Y"], bounds, screen_size)
-        
-        if last_p is None:
-            last_p = p1
-            
-        # Optimization: Only create a new segment if we've moved at least 3 pixels
-        if math.hypot(p2[0] - last_p[0], p2[1] - last_p[1]) < 3:
-            continue
-            
-        speed = safe_float(next_row.get("Speed", 0))
-        drs = is_drs_active(next_row.get("DRS", 0))
-        segments.append({"p1": last_p, "p2": p2, "speed": speed, "drs": drs})
-        last_p = p2
+    points = []
+    speeds = []
+    max_speed = best_driver["Speed"].max() if "Speed" in best_driver.columns else 1
+    if max_speed <= 0:
+        max_speed = 1
 
-    return segments
+    for _, row in best_driver.iterrows():
+        sx, sy = scale_point(row["X"], row["Y"], bounds, screen_size)
+        points.append((sx, sy))
+        spd = row.get("Speed", 0) if "Speed" in best_driver.columns else 0
+        speeds.append(spd / max_speed)
+    return points, speeds
 
 
+# ---------------------------------------------------------------------------
+# Interpolation
+# ---------------------------------------------------------------------------
 def get_interpolated_state(df, t):
-    """
-    Returns interpolated telemetry state for time t.
-    """
-    defaults = {
-        "X": 0.0,
-        "Y": 0.0,
-        "CumDist": 0.0,
-        "LapNumber": 0.0,
-        "Speed": 0.0,
-        "Throttle": 0.0,
-        "Brake": 0.0,
-        "nGear": 0.0,
-        "DRS": 0.0,
-    }
-
+    """Returns (X, Y, CumDist, LapNumber, Speed, DRS, Throttle, Brake, nGear)."""
+    zero = (0, 0, 0, 0, 0, 0, 0, 0, 0)
     if df.empty:
-        return defaults.copy()
+        return zero
 
     idx = df["Time"].searchsorted(t)
 
-    if idx == 0:
-        row = df.iloc[0]
-        return {key: safe_float(row.get(key, value), value) for key, value in defaults.items()}
-    if idx >= len(df):
-        row = df.iloc[-1]
-        return {key: safe_float(row.get(key, value), value) for key, value in defaults.items()}
+    def _row_vals(row):
+        return (
+            row["X"], row["Y"], row["CumDist"], row["LapNumber"],
+            row.get("Speed", 0), row.get("DRS", 0),
+            row.get("Throttle", 0), row.get("Brake", 0), row.get("nGear", 0),
+        )
 
-    t0_row = df.iloc[idx - 1]
-    t1_row = df.iloc[idx]
-    
-    # Try to get p0 and p3 for catmull-rom
-    p0_row = df.iloc[max(0, idx - 2)]
-    p3_row = df.iloc[min(len(df) - 1, idx + 1)]
-    
-    t0, t1 = safe_float(t0_row["Time"]), safe_float(t1_row["Time"])
+    if idx == 0:
+        return _row_vals(df.iloc[0])
+    if idx >= len(df):
+        return _row_vals(df.iloc[-1])
+
+    r0 = df.iloc[idx - 1]
+    r1 = df.iloc[idx]
+    t0, t1 = r0["Time"], r1["Time"]
 
     if t1 == t0:
-        return {key: safe_float(t0_row.get(key, value), value) for key, value in defaults.items()}
+        return _row_vals(r0)
 
-    alpha = (t - t0) / (t1 - t0)
-    state = {}
+    a = (t - t0) / (t1 - t0)
 
-    for key, default in defaults.items():
-        if key in ("LapNumber", "nGear", "DRS"):
-            source = t1_row if alpha >= 0.5 else t0_row
-            state[key] = safe_float(source.get(key, default), default)
+    x = r0["X"] + (r1["X"] - r0["X"]) * a
+    y = r0["Y"] + (r1["Y"] - r0["Y"]) * a
+    dist = r0["CumDist"] + (r1["CumDist"] - r0["CumDist"]) * a
+    lap = r0["LapNumber"]
+    speed = r0["Speed"] + (r1["Speed"] - r0["Speed"]) * a
+    drs = r1["DRS"]
+    throttle = r0["Throttle"] + (r1["Throttle"] - r0["Throttle"]) * a
+    brake = r0["Brake"] + (r1["Brake"] - r0["Brake"]) * a
+    gear = r0["nGear"]
+
+    return x, y, dist, lap, speed, drs, throttle, brake, gear
+
+
+# ---------------------------------------------------------------------------
+# Sector flash helpers
+# ---------------------------------------------------------------------------
+def _check_sector_flash(driver_info, drv_id, lap, prev_lap_sectors,
+                        best_sectors, overall_best_sectors):
+    """Return flash colour or None when a driver just completed a PB/OB sector."""
+    info = driver_info.get(drv_id, {})
+    sector_records = info.get("SectorTimes", [])
+    if not sector_records:
+        return None
+
+    flash_colour = None
+    for rec in sector_records:
+        if rec["LapNumber"] != int(lap):
             continue
+        sec = rec["Sector"]
+        t_sec = rec["Time"]
+        key = (drv_id, sec)
 
-        v1 = safe_float(t0_row.get(key, default), default)
-        v2 = safe_float(t1_row.get(key, default), default)
-        
-        if key in ("X", "Y"):
-            v0 = safe_float(p0_row.get(key, default), default)
-            v3 = safe_float(p3_row.get(key, default), default)
-            state[key] = catmull_rom(v0, v1, v2, v3, alpha)
-        else:
-            state[key] = v1 + (v2 - v1) * alpha
+        prev = best_sectors.get(key)
+        ov_prev = overall_best_sectors.get(sec)
 
-    return state
+        is_pb = prev is None or t_sec < prev
+        is_ob = ov_prev is None or t_sec < ov_prev
+
+        if is_pb:
+            best_sectors[key] = t_sec
+            flash_colour = GREEN
+        if is_ob:
+            overall_best_sectors[sec] = t_sec
+            flash_colour = PURPLE
+
+    return flash_colour
 
 
-def draw_track(screen, track_segments, show_heatmap, max_speed, camera=None, status_color=None):
-    if not track_segments:
+# ---------------------------------------------------------------------------
+# Drawing helpers
+# ---------------------------------------------------------------------------
+def _draw_speed_heatmap(screen, track_points, track_speeds, show_heatmap):
+    if not show_heatmap or len(track_points) < 2:
         return
+    for i in range(len(track_points) - 1):
+        col = speed_to_color(track_speeds[i])
+        pygame.draw.line(screen, col, track_points[i], track_points[i + 1], 5)
 
-    if camera is None:
-        camera = {"scale": 1.0, "target": (0, 0), "center": (0, 0)}
 
-    points = [apply_camera(track_segments[0]["p1"], camera)] + [
-        apply_camera(segment["p2"], camera) for segment in track_segments
+def _draw_drs_zones(screen, track_points, drs_segments, show_drs):
+    """Shade DRS activation zones on track outline."""
+    if not show_drs or not drs_segments or len(track_points) < 2:
+        return
+    n = len(track_points)
+    drs_col = (0, 200, 70)
+    for start_f, end_f in drs_segments:
+        i0 = max(0, int(start_f * n))
+        i1 = min(n - 1, int(end_f * n))
+        if i1 <= i0:
+            continue
+        for i in range(i0, i1):
+            pygame.draw.line(screen, drs_col, track_points[i], track_points[i + 1], 10)
+
+
+def _detect_drs_zones(best_driver_df):
+    """Detect DRS activation zones as fractional track ranges."""
+    if "DRS" not in best_driver_df.columns:
+        return []
+    drs_vals = best_driver_df["DRS"].values
+    n = len(drs_vals)
+    if n == 0:
+        return []
+
+    zones = []
+    in_zone = False
+    start = 0
+    for i in range(n):
+        active = int(drs_vals[i]) >= 10
+        if active and not in_zone:
+            start = i
+            in_zone = True
+        elif not active and in_zone:
+            zones.append((start / n, i / n))
+            in_zone = False
+    if in_zone:
+        zones.append((start / n, (n - 1) / n))
+    return zones
+
+
+def _draw_telemetry_bar(screen, font, d, screen_w, screen_h):
+    """Render F1-TV style telemetry bars at the bottom for the focused driver."""
+    bar_area_h = 60
+    bar_y0 = screen_h - 20 - bar_area_h
+    bg = pygame.Surface((screen_w, bar_area_h), pygame.SRCALPHA)
+    bg.fill((0, 0, 0, 160))
+    screen.blit(bg, (0, bar_y0))
+
+    metrics = [
+        ("THR", d.get("throttle", 0) / 100.0, (0, 200, 80)),
+        ("BRK", min(d.get("brake", 0), 100) / 100.0, (220, 40, 40)),
+        ("SPD", min(d.get("speed", 0), 370) / 370.0, (80, 180, 255)),
     ]
-    if len(points) > 1:
-        pygame.draw.lines(screen, TRACK_OUTLINE, False, points, 18)
 
-    if show_heatmap:
-        for segment in track_segments:
-            pygame.draw.line(
-                screen,
-                speed_to_color(segment["speed"], max_speed),
-                apply_camera(segment["p1"], camera),
-                apply_camera(segment["p2"], camera),
-                7
-            )
-    elif len(points) > 1:
-        track_col = status_color if status_color else TRACK_COLOR
-        pygame.draw.lines(screen, track_col, False, points, 7)
+    gear_val = int(d.get("gear", 0))
+    speed_val = int(d.get("speed", 0))
 
-    overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
-    for segment in track_segments:
-        if segment["drs"]:
-            pygame.draw.line(
-                overlay,
-                (*DRS_GREEN, 110),
-                apply_camera(segment["p1"], camera),
-                apply_camera(segment["p2"], camera),
-                12
-            )
-    screen.blit(overlay, (0, 0))
+    total_bar_w = screen_w - 340
+    bar_w = total_bar_w // len(metrics) - 20
+    x_start = 20
+    label_font = pygame.font.SysFont("Consolas", 14, bold=True)
 
+    for i, (label, ratio, col) in enumerate(metrics):
+        bx = x_start + i * (bar_w + 20)
+        by = bar_y0 + 30
+        bh = 16
 
-def track_view_center(screen_size):
-    screen_w, screen_h = screen_size
-    return ((screen_w - SIDEBAR_WIDTH) // 2, HEADER_HEIGHT + (screen_h - HEADER_HEIGHT - SEEK_BAR_HEIGHT) // 2)
+        pygame.draw.rect(screen, (40, 40, 50), (bx, by, bar_w, bh), border_radius=3)
+        fill_w = int(bar_w * max(0, min(1, ratio)))
+        if fill_w > 0:
+            pygame.draw.rect(screen, col, (bx, by, fill_w, bh), border_radius=3)
+
+        lbl = label_font.render(label, True, (180, 180, 180))
+        screen.blit(lbl, (bx, bar_y0 + 10))
+
+        pct_str = f"{int(ratio * 100)}%" if label != "SPD" else f"{speed_val} km/h"
+        pct = label_font.render(pct_str, True, TEXT_COLOR)
+        screen.blit(pct, (bx + bar_w + 4, by))
+
+    val_font = pygame.font.SysFont("Consolas", 20, bold=True)
+    gear_label = val_font.render(f"GEAR  {gear_val}", True, (255, 220, 60))
+    screen.blit(gear_label, (screen_w - 310, bar_y0 + 20))
 
 
-def build_camera(focused_driver, frame_by_driver, screen_size):
-    center = track_view_center(screen_size)
-    if focused_driver and focused_driver in frame_by_driver:
-        target = (frame_by_driver[focused_driver]["gx"], frame_by_driver[focused_driver]["gy"])
-        return {"scale": 1.45, "target": target, "center": center}
-    return {"scale": 1.0, "target": center, "center": center}
-
-
-def apply_camera(point, camera):
-    scale = camera.get("scale", 1.0)
-    if scale == 1.0:
-        return int(point[0]), int(point[1])
-
-    target_x, target_y = camera["target"]
-    center_x, center_y = camera["center"]
-    return (
-        int(center_x + (point[0] - target_x) * scale),
-        int(center_y + (point[1] - target_y) * scale)
-    )
-
-
-def draw_dashed_line(surface, color, start, end, width=2, dash_length=10, gap_length=7):
-    x1, y1 = start
-    x2, y2 = end
-    dx = x2 - x1
-    dy = y2 - y1
-    length = math.hypot(dx, dy)
-    if length <= 0:
-        return
-
-    ux = dx / length
-    uy = dy / length
-    pos = 0
-    while pos < length:
-        dash_end = min(pos + dash_length, length)
-        dash_start_pt = (int(x1 + ux * pos), int(y1 + uy * pos))
-        dash_end_pt = (int(x1 + ux * dash_end), int(y1 + uy * dash_end))
-        pygame.draw.line(surface, color, dash_start_pt, dash_end_pt, width)
-        pos += dash_length + gap_length
-
-
-def draw_ghost_trail(screen, points, color, camera):
-    if len(points) <= 1:
-        return
-
-    overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
-    ghost_color = (*color, 105)
-    for i in range(len(points) - 1):
-        p1 = apply_camera((points[i][0], points[i][1]), camera)
-        p2 = apply_camera((points[i + 1][0], points[i + 1][1]), camera)
-        draw_dashed_line(overlay, ghost_color, p1, p2, width=3)
-    screen.blit(overlay, (0, 0))
-
-
-def draw_minimap(screen, track_segments, current_frame_data, focused_driver, ghost_driver, drv_colors):
-    if not track_segments or focused_driver is None:
-        return
-
-    rect = pygame.Rect(20, HEADER_HEIGHT + 14, 210, 145)
-    pygame.draw.rect(screen, (16, 18, 24), rect, border_radius=8)
-    pygame.draw.rect(screen, UI_BORDER, rect, width=1, border_radius=8)
-
-    points = [track_segments[0]["p1"]] + [segment["p2"] for segment in track_segments]
-    xs = [point[0] for point in points]
-    ys = [point[1] for point in points]
-    min_x, max_x = min(xs), max(xs)
-    min_y, max_y = min(ys), max(ys)
-    range_x = max(1, max_x - min_x)
-    range_y = max(1, max_y - min_y)
-    pad = 14
-
-    def mini_point(point):
-        x = rect.x + pad + int((point[0] - min_x) / range_x * (rect.w - pad * 2))
-        y = rect.y + pad + int((point[1] - min_y) / range_y * (rect.h - pad * 2))
-        return x, y
-
-    mini_points = [mini_point(point) for point in points]
-    if len(mini_points) > 1:
-        pygame.draw.lines(screen, (70, 74, 86), False, mini_points, 2)
-
-    mini_font = get_font("Consolas", 11, bold=True)
-    screen.blit(mini_font.render("MINI MAP", True, SUBTEXT_COLOR), (rect.x + 10, rect.y + 8))
-
-    for d in current_frame_data:
-        drv_id = d["id"]
-        pos = mini_point((d["gx"], d["gy"]))
-        radius = 4 if drv_id in (focused_driver, ghost_driver) else 3
-        color = drv_colors.get(drv_id, (220, 220, 220))
-        if drv_id == ghost_driver:
-            pygame.draw.circle(screen, (245, 245, 245), pos, radius + 2, width=1)
-        if drv_id == focused_driver:
-            pygame.draw.circle(screen, ACCENT_BLUE, pos, radius + 3, width=1)
-        pygame.draw.circle(screen, color, pos, radius)
-
-
-def draw_delta_panel(screen, focused_driver, ghost_driver, driver_info, frame_by_driver, delta_history):
-    if not focused_driver or not ghost_driver:
-        return
-    if focused_driver not in frame_by_driver or ghost_driver not in frame_by_driver:
-        return
-
-    rect = pygame.Rect(20, HEADER_HEIGHT + 170, 210, 105)
-    pygame.draw.rect(screen, (16, 18, 24), rect, border_radius=8)
-    pygame.draw.rect(screen, UI_BORDER, rect, width=1, border_radius=8)
-
-    focus_abbr = driver_info[focused_driver]["Abbreviation"]
-    ghost_abbr = driver_info[ghost_driver]["Abbreviation"]
-    delta = delta_history[-1] if delta_history else 0.0
-
-    font_title = get_font("Consolas", 12, bold=True)
-    font_value = get_font("Consolas", 16, bold=True)
-    screen.blit(font_title.render(f"DELTA {focus_abbr} vs {ghost_abbr}", True, SUBTEXT_COLOR), (rect.x + 10, rect.y + 8))
-
-    label = f"{ghost_abbr} {'+' if delta >= 0 else ''}{delta:.2f}s"
-    value_color = (255, 120, 120) if delta > 0 else (120, 255, 145)
-    screen.blit(font_value.render(label, True, value_color), (rect.x + 10, rect.y + 28))
-
-    if len(delta_history) < 2:
-        return
-
-    chart = pygame.Rect(rect.x + 10, rect.y + 58, rect.w - 20, 34)
-    pygame.draw.line(screen, (70, 74, 86), (chart.x, chart.centery), (chart.right, chart.centery), 1)
-    visible = list(delta_history)[-80:]
-    max_abs = max(0.1, max(abs(value) for value in visible))
-    points = []
-    for idx, value in enumerate(visible):
-        x = chart.x + int(idx / max(1, len(visible) - 1) * chart.w)
-        y = chart.centery - int((value / max_abs) * (chart.h // 2))
-        points.append((x, y))
-    if len(points) > 1:
-        pygame.draw.lines(screen, FASTEST_PURPLE, False, points, 2)
-
-
-def draw_dashboard(
-    screen,
-    t,
-    speed,
-    driver_info,
-    leaderboard_order,
-    gaps,
-    intervals,
-    current_lap,
-    total_laps,
-    total_time,
-    gap_mode,
-    focused_driver,
-    fastest_driver,
-    fastest_lap_time,
-    pit_drivers,
-    drs_drivers,
-    row_positions,
-    active_overtakes,
-    frame_by_driver
-):
+# ---------------------------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------------------------
+def draw_dashboard(screen, font, t, speed, driver_info, leaderboard_order,
+                   gaps, current_lap, total_laps, total_time, gap_mode,
+                   focused_driver, fastest_lap_driver, animated_y, pit_drivers,
+                   sector_flash):
     screen_w, screen_h = screen.get_size()
 
     # --- Top Header ---
-    pygame.draw.rect(screen, UI_BG, (0, 0, screen_w, HEADER_HEIGHT))
-    pygame.draw.line(screen, UI_BORDER, (0, HEADER_HEIGHT), (screen_w, HEADER_HEIGHT), 2)
+    header_h = 70
+    pygame.draw.rect(screen, UI_BG, (0, 0, screen_w, header_h))
+    pygame.draw.line(screen, UI_BORDER, (0, header_h), (screen_w, header_h), 2)
 
     minutes = int(t // 60)
     seconds = int(t % 60)
     millis = int((t % 1) * 100)
+    time_str = f"TIME: {minutes:02}:{seconds:02}.{millis:02}"
+    lap_str = f"LAP {int(current_lap)} / {total_laps}"
 
-    font_large = get_font("Consolas", 28, bold=True)
-    font_label = get_font("Consolas", 12, bold=True)
-    font_small = get_font("Consolas", 12)
-    font_badge = get_font("Consolas", 11, bold=True)
+    font_large = pygame.font.SysFont("Consolas", 28, bold=True)
 
-    # 1. Race Time (Left)
-    screen.blit(font_label.render("RACE TIME", True, (130, 130, 140)), (22, 12))
-    time_val_str = f"{minutes:02}:{seconds:02}.{millis:02}"
-    screen.blit(font_large.render(time_val_str, True, (240, 240, 240)), (20, 26))
+    time_surf = font_large.render(time_str, True, (200, 200, 200))
+    screen.blit(time_surf, (20, 20))
 
-    # 2. Lap Counter (Center)
-    lap_val_str = f"{int(current_lap)} / {total_laps}"
-    lap_surf = font_large.render(lap_val_str, True, (255, 255, 255))
-    center_x = (screen_w - SIDEBAR_WIDTH) // 2
-    screen.blit(font_label.render("CURRENT LAP", True, (130, 130, 140)), (center_x - lap_surf.get_width() // 2, 12))
-    screen.blit(lap_surf, (center_x - lap_surf.get_width() // 2, 26))
+    lap_surf = font_large.render(lap_str, True, (255, 255, 255))
+    screen.blit(lap_surf, (screen_w // 2 - lap_surf.get_width() // 2, 20))
 
-    # 3. Playback Speed (Right)
-    speed_surf = font_large.render(f"{speed:g}x", True, ACCENT_BLUE)
-    speed_rect = speed_surf.get_rect(right=screen_w - SIDEBAR_WIDTH - 22, top=26)
-    screen.blit(font_label.render("PLAYBACK", True, (130, 130, 140)), (speed_rect.x, 12))
-    screen.blit(speed_surf, speed_rect)
-
-    # 4. Fastest Lap Info (Bottom Left)
-    if fastest_driver and fastest_driver in driver_info:
-        fl_text = f"FASTEST LAP: {driver_info[fastest_driver]['Abbreviation']} ({format_lap_time(fastest_lap_time)})"
-        screen.blit(font_small.render(fl_text, True, FASTEST_PURPLE), (22, 58))
-
-    # 5. Help Text (Bottom Right)
-    help_text = "[Click] Focus  [Shift+Click] Ghost  [H] Heatmap  [G] Gap  [M] RaceCtrl  [F] Clear"
-    help_surf = font_small.render(help_text, True, (100, 100, 110))
-    help_rect = help_surf.get_rect(right=screen_w - SIDEBAR_WIDTH - 22, top=58)
-    screen.blit(help_surf, help_rect)
+    speed_surf = font_large.render(f"SPEED: {speed}x", True, (100, 200, 255))
+    screen.blit(speed_surf, (screen_w - speed_surf.get_width() - 20, 20))
 
     # --- Side Leaderboard ---
-    panel_w = SIDEBAR_WIDTH
+    panel_w = 240
     panel_x = screen_w - panel_w
-    panel_y = HEADER_HEIGHT
-    panel_h = screen_h - HEADER_HEIGHT - SEEK_BAR_HEIGHT
+    panel_y = header_h
+    panel_h = screen_h - header_h - 20
 
     pygame.draw.rect(screen, UI_BG, (panel_x, panel_y, panel_w, panel_h))
-    pygame.draw.line(screen, UI_BORDER, (panel_x, panel_y), (panel_x, screen_h - SEEK_BAR_HEIGHT), 2)
+    pygame.draw.line(screen, UI_BORDER, (panel_x, panel_y), (panel_x, screen_h - 20), 2)
 
-    header_font = get_font("Consolas", 13, bold=True)
+    header_font = pygame.font.SysFont("Consolas", 14, bold=True)
     pygame.draw.rect(screen, (30, 35, 45), (panel_x, panel_y, panel_w, 35))
 
-    gap_header = "INT" if gap_mode == "interval" else "GAP"
-    screen.blit(header_font.render("POS", True, (120, 120, 120)), (panel_x + 10, panel_y + 10))
-    screen.blit(header_font.render("DRIVER", True, (120, 120, 120)), (panel_x + 50, panel_y + 10))
-    screen.blit(header_font.render(gap_header, True, (120, 120, 120)), (panel_x + 204, panel_y + 10))
+    screen.blit(header_font.render("POS", True, (120, 120, 120)),
+                (panel_x + 10, panel_y + 10))
+    screen.blit(header_font.render("DRIVER", True, (120, 120, 120)),
+                (panel_x + 50, panel_y + 10))
+    gap_label = "INT" if gap_mode == "interval" else "GAP"
+    screen.blit(header_font.render(gap_label, True, (120, 120, 120)),
+                (panel_x + 160, panel_y + 10))
 
+    list_start_y = panel_y + 40
     row_h = 36
-    name_font = get_font("Consolas", 18, bold=True)
-    gap_font = get_font("Consolas", 15)
+    name_font = pygame.font.SysFont("Consolas", 18, bold=True)
+    gap_font = pygame.font.SysFont("Consolas", 16)
+    badge_font = pygame.font.SysFont("Consolas", 10, bold=True)
 
-    sidebar_rects = {}
-    ordered_positions = {drv_id: pos for pos, drv_id in enumerate(leaderboard_order)}
+    for pos, drv_id in enumerate(leaderboard_order):
+        info = driver_info.get(drv_id, {})
+        target_y = list_start_y + (pos * row_h)
 
-    for drv_id in leaderboard_order:
-        pos = ordered_positions[drv_id]
-        info = driver_info[drv_id]
-        y_pos = int(row_positions.get(drv_id, panel_y + 40 + (pos * row_h)))
+        # Animated position lerp
+        if drv_id not in animated_y:
+            animated_y[drv_id] = float(target_y)
+        animated_y[drv_id] = _lerp(animated_y[drv_id], target_y, 0.12)
+        y_pos = int(animated_y[drv_id])
 
-        if y_pos + row_h > screen_h - SEEK_BAR_HEIGHT:
+        if y_pos + row_h > screen_h - 20:
             continue
 
-        ot_attacker = any(o["attacker"] == drv_id for o in active_overtakes)
-        ot_defender = any(o["defender"] == drv_id for o in active_overtakes)
-
-        is_dimmed = focused_driver is not None and drv_id != focused_driver
+        is_focused = (focused_driver == drv_id)
         bg_col = (25, 30, 40) if pos % 2 == 0 else (22, 25, 30)
         if pos == 0:
             bg_col = (35, 40, 50)
-            
-        if ot_attacker:
-            pulse = 0.5 + 0.5 * math.sin(t * 12)
-            bg_col = lerp_color(bg_col, (30, 110, 50), pulse)
-        elif ot_defender:
-            pulse = 0.5 + 0.5 * math.sin(t * 12)
-            bg_col = lerp_color(bg_col, (110, 40, 40), pulse)
-        elif is_dimmed:
-            bg_col = muted_color(bg_col, 0.7)
+        if is_focused:
+            bg_col = (50, 55, 70)
 
-        row_rect = pygame.Rect(panel_x, y_pos, panel_w, row_h)
-        sidebar_rects[drv_id] = row_rect
-        pygame.draw.rect(screen, bg_col, row_rect)
+        pygame.draw.rect(screen, bg_col, (panel_x, y_pos, panel_w, row_h))
 
-        if focused_driver == drv_id:
-            pygame.draw.rect(screen, ACCENT_BLUE, row_rect.inflate(-4, -4), 2, border_radius=4)
+        try:
+            c_hex = info["TeamColor"].lstrip("#")
+            c_rgb = tuple(int(c_hex[i:i + 2], 16) for i in (0, 2, 4))
+        except Exception:
+            c_rgb = (255, 255, 255)
 
-        c_rgb = parse_team_color(info["TeamColor"])
-        if is_dimmed:
-            c_rgb = muted_color(c_rgb)
-        pygame.draw.rect(screen, c_rgb, (panel_x + 4, y_pos + 4, 4, row_h - 8), border_radius=2)
+        pygame.draw.rect(screen, c_rgb,
+                         (panel_x + 4, y_pos + 4, 4, row_h - 8), border_radius=2)
 
-        text_col = (115, 115, 115) if is_dimmed else TEXT_COLOR
-        pos_surf = name_font.render(str(pos + 1), True, text_col if pos >= 3 else (255, 255, 255))
+        pos_col = (255, 255, 255) if pos < 3 else (150, 150, 150)
+        pos_surf = name_font.render(str(pos + 1), True, pos_col)
         screen.blit(pos_surf, (panel_x + 15, y_pos + 8))
 
-        name_surf = name_font.render(info["Abbreviation"], True, text_col)
+        name_surf = name_font.render(info.get("Abbreviation", "???"), True, TEXT_COLOR)
         screen.blit(name_surf, (panel_x + 50, y_pos + 8))
 
-        # --- Tyre compound + age ---
-        drv_lap = int(frame_by_driver[drv_id]["lap"])
-        lap_stints = info.get("LapStints", {})
+        # Fastest lap crown
+        if fastest_lap_driver and drv_id == fastest_lap_driver:
+            crown_surf = badge_font.render("FL", True, PURPLE)
+            screen.blit(crown_surf, (panel_x + 105, y_pos + 12))
 
-        stint = lap_stints.get(drv_lap)
-        if not stint and lap_stints:
-            past = [k for k in lap_stints if k <= drv_lap]
-            key = max(past) if past else min(lap_stints)
-            stint = lap_stints[key]
-        if not stint:
-            stint = {}
-
-        # FIX C: always normalise compound at render time
-        compound = str(stint.get("Compound", "UNKNOWN")).upper().strip()
-        if compound in ("NAN", "NONE", ""):
-            compound = "UNKNOWN"
-
-        stint_start = stint.get("StintStartLap", drv_lap)
-        if lap_stints:
-            # Live computed age — never frozen, always correct
-            tyre_life = max(1, drv_lap - stint_start + 1)
-        else:
-            # FIX B: fallback to 1 (full health) not 0 (dead tyre)
-            tyre_life = max(1, int(stint.get("TyreLife", 1)))
-
-        # --- Tyre health calculation ---
-        if _tyre_model_global and _tyre_model_global.fitted:
-            _h = _tyre_model_global.get_health(compound, int(tyre_life))
-            _health_pct = _h["health"]
-            _cliff = _h["cliff_warning"]
-        else:
-            max_stints = {"SOFT": 22, "MEDIUM": 34, "HARD": 50,
-                          "INTERMEDIATE": 30, "WET": 25}
-            max_s = max_stints.get(compound, 30)
-            _health_pct = max(0, int(100 - (tyre_life / max_s) * 100))
-            _cliff = _health_pct < 20
-
-        # --- Badges (overtake arrow, crown, PIT, DRS) ---
-        # badge_x flows left-to-right starting after the driver name
-        badge_x = panel_x + 94
-
-        if ot_attacker:
-            tri_x = badge_x + 6
-            tri_y = y_pos + 17
-            pygame.draw.polygon(screen, (80, 255, 120),
-                                [(tri_x, tri_y-5), (tri_x-5, tri_y+4), (tri_x+5, tri_y+4)])
-            badge_x += 18
-        elif ot_defender:
-            tri_x = badge_x + 6
-            tri_y = y_pos + 17
-            pygame.draw.polygon(screen, (255, 80, 80),
-                                [(tri_x, tri_y+4), (tri_x-5, tri_y-5), (tri_x+5, tri_y-5)])
-            badge_x += 18
-
-        if drv_id == fastest_driver:
-            crown_surf = name_font.render("♕", True, FASTEST_PURPLE)
-            screen.blit(crown_surf, (badge_x, y_pos + 6))
-            badge_x += 26
-
+        # Pit stop badge
         if drv_id in pit_drivers:
-            flash = 0.5 + 0.5 * math.sin(t * 8)
-            pit_color = lerp_color((120, 80, 10), PIT_YELLOW, flash)
-            pit_dur = pit_drivers[drv_id]
-            if pit_dur < 120:
-                badge_rect = draw_badge(screen, f"PIT {pit_dur:.1f}s",
-                                        font_badge, badge_x, y_pos + 9,
-                                        (30, 20, 0), pit_color)
-            else:
-                badge_rect = draw_badge(screen, "OUT", font_badge,
-                                        badge_x, y_pos + 9,
-                                        (30, 0, 0), (255, 60, 60))
-            badge_x = badge_rect.right + 4
+            pit_bg_rect = pygame.Rect(panel_x + 118, y_pos + 10, 28, 14)
+            pygame.draw.rect(screen, (200, 60, 60), pit_bg_rect, border_radius=3)
+            pit_surf = badge_font.render("PIT", True, (255, 255, 255))
+            screen.blit(pit_surf, (panel_x + 120, y_pos + 11))
 
-        if drv_id in drs_drivers:
-            draw_badge(screen, "DRS", font_badge, badge_x, y_pos + 9,
-                       (0, 40, 8), DRS_GREEN)
-
-        # FIX A: Tyre ring + life label pinned to a FIXED position from
-        # the right edge of the row — badges can never overlap it.
-        tyre_ring_x = panel_x + panel_w - 46   # fixed slot, right-aligned
-        tyre_ring_y = y_pos + row_h // 2
-
-        # Optional cliff warning: flash ring red when near the cliff
-        ring_compound = compound if not _cliff else "SOFT"
-        draw_tyre_health_ring(screen, tyre_ring_x, tyre_ring_y, 8,
-                              _health_pct, ring_compound)
-
-        val_font = get_font("Consolas", 11, bold=True)
-        life_color = (255, 80, 80) if _cliff else SUBTEXT_COLOR
-        life_surf = val_font.render(f"{tyre_life}L", True, life_color)
-        screen.blit(life_surf, (tyre_ring_x + 11, tyre_ring_y - 6))
-
-        metric = intervals if gap_mode == "interval" else gaps
-        gap_val = metric.get(drv_id, 0)
+        # Gap / Interval display
+        gap_val = gaps.get(drv_id, 0)
         if pos == 0:
-            gap_str = "LEAD"
+            gap_str = "LEADER"
             col = (100, 255, 100)
         else:
             gap_str = f"+{gap_val:.1f}s"
-            col = (220, 145, 145) if gap_mode == "gap" else (240, 215, 145)
+            col = (200, 100, 100)
 
-        if is_dimmed:
-            col = muted_color(col)
         gap_surf = gap_font.render(gap_str, True, col)
-        screen.blit(gap_surf, (panel_x + 204, y_pos + 10))
+        screen.blit(gap_surf, (panel_x + 160, y_pos + 10))
 
-    return sidebar_rects
-
-
-def draw_telemetry_overlay(screen, focused_driver, driver_info, frame_by_driver, max_speed):
-    if not focused_driver or focused_driver not in frame_by_driver:
-        return
-
-    screen_w, screen_h = screen.get_size()
-    panel_w = screen_w - SIDEBAR_WIDTH - 120
-    x = 60
-    y = screen_h - SEEK_BAR_HEIGHT - 82
-    h = 62
-
-    panel = pygame.Surface((panel_w, h), pygame.SRCALPHA)
-    pygame.draw.rect(panel, (18, 20, 26, 220), (0, 0, panel_w, h), border_radius=8)
-    pygame.draw.rect(panel, (70, 75, 90, 210), (0, 0, panel_w, h), width=1, border_radius=8)
-    screen.blit(panel, (x, y))
-
-    info = driver_info[focused_driver]
-    state = frame_by_driver[focused_driver]
-    title_font = get_font("Consolas", 16, bold=True)
-    label_font = get_font("Consolas", 12)
-    value_font = get_font("Consolas", 18, bold=True)
-
-    title = f"{info['Abbreviation']} TELEMETRY"
-    screen.blit(title_font.render(title, True, TEXT_COLOR), (x + 14, y + 10))
-
-    speed = state["speed"]
-    throttle = clamp(state["throttle"] / 100.0, 0.0, 1.0)
-    brake_raw = state["brake"]
-    brake = clamp(brake_raw if brake_raw <= 1 else brake_raw / 100.0, 0.0, 1.0)
-
-    bar_specs = [
-        ("SPD", clamp(speed / max(max_speed, 1.0), 0.0, 1.0), speed_to_color(speed, max_speed), f"{int(speed)} km/h"),
-        ("THR", throttle, (80, 220, 100), f"{int(throttle * 100)}%"),
-        ("BRK", brake, (255, 90, 90), f"{int(brake * 100)}%"),
-    ]
-
-    bar_x = x + 170
-    bar_y = y + 12
-    bar_w = 150
-    for idx, (label, ratio, color, value) in enumerate(bar_specs):
-        bx = bar_x + idx * 185
-        screen.blit(label_font.render(label, True, SUBTEXT_COLOR), (bx, bar_y))
-        pygame.draw.rect(screen, (38, 42, 50), (bx, bar_y + 18, bar_w, 12), border_radius=4)
-        pygame.draw.rect(screen, color, (bx, bar_y + 18, int(bar_w * ratio), 12), border_radius=4)
-        screen.blit(label_font.render(value, True, TEXT_COLOR), (bx, bar_y + 35))
-
-    gear = int(state["gear"])
-    drs_text = "DRS OPEN" if state["drs_active"] else "DRS CLOSED"
-    gear_surf = value_font.render(f"G{gear}", True, TEXT_COLOR)
-    screen.blit(gear_surf, (x + panel_w - 118, y + 12))
-    screen.blit(label_font.render(drs_text, True, DRS_GREEN if state["drs_active"] else SUBTEXT_COLOR), (x + panel_w - 118, y + 40))
-
-
-def blend_color(fg: tuple, bg: tuple, alpha: float) -> tuple:
-    return tuple(int(f * alpha + b * (1 - alpha)) for f, b in zip(fg, bg))
-
-def draw_similarity_panel(screen, focused_driver, driver_info, similarity_matrix):
-    screen_w, screen_h = screen.get_size()
-    panel_w = SIDEBAR_WIDTH
-    panel_x = screen_w - panel_w
-    panel_y = HEADER_HEIGHT
-
-    # Draw Background
-    pygame.draw.rect(screen, UI_BG, (panel_x, panel_y, panel_w, screen_h - panel_y))
-    pygame.draw.line(screen, UI_BORDER, (panel_x, panel_y), (panel_x, screen_h), 2)
-
-    font_header = get_font("Consolas", 14, bold=True)
-    font_name = get_font("Arial", 14, bold=True)
-    font_val = get_font("Consolas", 13)
-
-    focused_abbr = driver_info.get(focused_driver, {}).get("Abbreviation", focused_driver)
-    header = f"STYLE SIMILARITY — {focused_abbr}"
-    screen.blit(font_header.render(header, True, (210, 210, 210)), (panel_x + 16, panel_y + 16))
-    pygame.draw.line(screen, UI_BORDER, (panel_x, panel_y + 40), (screen_w, panel_y + 40), 1)
-
-    if similarity_matrix is None or focused_driver not in similarity_matrix:
-        screen.blit(font_val.render("No data", True, (120, 120, 120)), (panel_x + 16, panel_y + 60))
-        return {}
-
-    scores = similarity_matrix[focused_driver]
-    # Filter valid
-    valid_scores = [(drv, val) for drv, val in scores.items() if drv != focused_driver and not np.isnan(val)]
-    if not valid_scores:
-        screen.blit(font_val.render("No data", True, (120, 120, 120)), (panel_x + 16, panel_y + 60))
-        return {}
-
-    # Sort lowest first
-    valid_scores.sort(key=lambda x: x[1])
-    max_score = max(x[1] for x in valid_scores) if valid_scores else 1.0
-
-    y = panel_y + 50
-    for drv, score in valid_scores:
-        info = driver_info.get(drv, {})
-        abbr = info.get("Abbreviation", drv)
-        c_hex = info.get("TeamColor", "#CCCCCC").lstrip("#")
-        try:
-            team_color = (int(c_hex[0:2], 16), int(c_hex[2:4], 16), int(c_hex[4:6], 16))
-        except:
-            team_color = (200, 200, 200)
-
-        # Draw stripe
-        pygame.draw.rect(screen, team_color, (panel_x + 16, y, 4, 20))
-        
-        # Draw bar
-        bar_w = int((score / max_score) * (panel_w - 110))
-        bar_color = blend_color(team_color, UI_BG, 0.6)
-        pygame.draw.rect(screen, bar_color, (panel_x + 24, y + 2, bar_w, 16))
-
-        # Text
-        screen.blit(font_name.render(abbr, True, (240, 240, 240)), (panel_x + 28, y + 2))
-        screen.blit(font_val.render(f"{score:.2f}", True, (190, 190, 190)), (panel_x + panel_w - 50, y + 2))
-
-        y += 28
-
-    return {}
-
-
-
-# ---------------------------------------------------------------------------
-# Track status colors  (FIA status codes)
-# ---------------------------------------------------------------------------
-_STATUS_TRACK_COLORS = {
-    "1": (60, 60, 70),      # AllClear / Green
-    "2": (200, 180, 0),     # Yellow
-    "4": (180, 100, 30),    # Safety Car
-    "5": (200, 30, 30),     # Red Flag
-    "6": (180, 130, 50),    # VSC
-    "7": (180, 130, 50),    # VSC Ending
-}
-
-def _get_track_status_at(track_statuses, t):
-    """Return the status code active at time *t*."""
-    current = "1"
-    for s in track_statuses:
-        if s["time"] <= t:
-            current = s["status"]
-        else:
-            break
-    return current
-
-def _status_label(code):
-    return {"1": "", "2": "YELLOW", "4": "SAFETY CAR",
-            "5": "RED FLAG", "6": "VSC", "7": "VSC ENDING"}.get(code, "")
-
-
-# ---------------------------------------------------------------------------
-# Weather panel
-# ---------------------------------------------------------------------------
-def draw_weather_panel(screen, weather_timeline, t, focused_driver=None):
-    """Small translucent weather overlay in the top-left area."""
-    if not weather_timeline:
-        return
-    # Find closest weather sample
-    best = weather_timeline[0]
-    for w in weather_timeline:
-        if w["time"] <= t:
-            best = w
-        else:
-            break
-    panel_w, panel_h = 195, 140
-    py_offset = 165 if focused_driver else 0
-    px, py = 18, HEADER_HEIGHT + 14 + py_offset
-    bg = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
-    bg.fill((16, 18, 24, 210))
-    screen.blit(bg, (px, py))
-    pygame.draw.rect(screen, UI_BORDER, (px, py, panel_w, panel_h), 1, border_radius=6)
-
-    fnt = get_font("Consolas", 12, bold=True)
-    fnt_val = get_font("Consolas", 13)
-    screen.blit(fnt.render("WEATHER", True, (180, 180, 190)), (px + 10, py + 8))
-    items = [
-        ("Air",   f"{best.get('AirTemp', 0):.1f} C"),
-        ("Track", f"{best.get('TrackTemp', 0):.1f} C"),
-        ("Humid", f"{best.get('Humidity', 0):.0f}%"),
-        ("Wind",  f"{best.get('WindSpeed', 0):.0f} km/h"),
-        ("Rain",  "Yes" if best.get("Rainfall", 0) > 0 else "No"),
-    ]
-    for i, (label, val) in enumerate(items):
-        y = py + 28 + i * 20
-        screen.blit(fnt.render(label, True, SUBTEXT_COLOR), (px + 10, y))
-        screen.blit(fnt_val.render(val, True, TEXT_COLOR), (px + 75, y))
-
-
-# ---------------------------------------------------------------------------
-# Race control feed (scrolling)
-# ---------------------------------------------------------------------------
-def draw_race_control_feed(screen, rc_messages, t, screen_w, show_feed, show_similarity=False):
-    """Draw recent race control messages as a scrolling feed."""
-    if not show_feed or not rc_messages:
-        return
-    recent = [m for m in rc_messages if m["time"] <= t][-8:]
-    if not recent:
-        return
-    panel_w = 340
-    panel_h = 20 + len(recent) * 18
-    offset_w = 400 if show_similarity else SIDEBAR_WIDTH
-    px = screen_w - offset_w - panel_w - 15
-    py = HEADER_HEIGHT + 14
-    bg = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
-    bg.fill((16, 18, 24, 210))
-    screen.blit(bg, (px, py))
-    pygame.draw.rect(screen, UI_BORDER, (px, py, panel_w, panel_h), 1, border_radius=6)
-    fnt = get_font("Consolas", 11)
-    fnt_b = get_font("Consolas", 11, bold=True)
-    screen.blit(fnt_b.render("RACE CONTROL", True, (180, 180, 190)), (px + 8, py + 4))
-    for i, msg in enumerate(reversed(recent)):
-        y = py + 22 + i * 18
-        flag = msg.get("flag", "")
-        col = (220, 220, 220)
-        if "YELLOW" in flag.upper():
-            col = (220, 200, 0)
-        elif "RED" in flag.upper():
-            col = (220, 50, 50)
-        elif "GREEN" in flag.upper():
-            col = (60, 220, 80)
-        elif "BLUE" in flag.upper():
-            col = (80, 140, 255)
-        mins = int(msg["time"] // 60)
-        secs = int(msg["time"] % 60)
-        ts = f"{mins:02}:{secs:02}"
-        text = msg.get("message", "")[:40]
-        screen.blit(fnt.render(f"{ts}  {text}", True, col), (px + 8, y))
-
-
-# ---------------------------------------------------------------------------
-# Progress bar with event markers
-# ---------------------------------------------------------------------------
-def draw_progress_bar_with_markers(screen, t, total_time, screen_w, screen_h,
-                                   track_statuses, rc_messages, driver_info):
-    """Seek bar with colored status bands and event markers."""
-    bar_h = SEEK_BAR_HEIGHT
+    # --- Seek Bar ---
+    bar_h = 20
     bar_y = screen_h - bar_h
     pygame.draw.rect(screen, (10, 10, 10), (0, bar_y, screen_w, bar_h))
-
-    # Draw status color bands
-    if track_statuses and total_time > 0:
-        for i in range(len(track_statuses)):
-            s = track_statuses[i]
-            end_t = track_statuses[i + 1]["time"] if i + 1 < len(track_statuses) else total_time
-            x0 = int(s["time"] / total_time * screen_w)
-            x1 = int(end_t / total_time * screen_w)
-            col = _STATUS_TRACK_COLORS.get(s["status"], (30, 30, 35))
-            if s["status"] != "1":
-                dim = (col[0] // 3, col[1] // 3, col[2] // 3)
-                pygame.draw.rect(screen, dim, (x0, bar_y, x1 - x0, bar_h))
-
-    # Pit stop markers (small triangles)
-    for drv_id, info in driver_info.items():
-        for pw in info.get("PitWindows", []):
-            x = int(pw["start"] / total_time * screen_w) if total_time > 0 else 0
-            pygame.draw.polygon(screen, (220, 190, 40),
-                                [(x, bar_y), (x - 3, bar_y - 6), (x + 3, bar_y - 6)])
-
-    # Progress fill
     progress = t / total_time if total_time > 0 else 0
-    progress_w = int(screen_w * clamp(progress, 0.0, 1.0))
+    progress_w = int(screen_w * progress)
     pygame.draw.rect(screen, (200, 50, 50), (0, bar_y, progress_w, bar_h))
-    pygame.draw.line(screen, (255, 255, 255), (progress_w, bar_y), (progress_w, screen_h), 2)
+    pygame.draw.line(screen, (255, 255, 255),
+                     (progress_w, bar_y), (progress_w, screen_h), 2)
+
+    # Mode indicator hints
+    hint_font = pygame.font.SysFont("Consolas", 11)
+    mode_text = f"[G] {'Interval' if gap_mode == 'interval' else 'Gap to Leader'}"
+    mode_text += "  [H] Heatmap  [D] DRS  [T] Telemetry"
+    if focused_driver:
+        abbr = driver_info.get(focused_driver, {}).get("Abbreviation", "???")
+        mode_text += f"  | Focus: {abbr} (click to release)"
+    hint = hint_font.render(mode_text, True, (100, 100, 110))
+    screen.blit(hint, (10, screen_h - bar_h - 16))
 
 
 # ---------------------------------------------------------------------------
-# Race controls HUD (clickable)
+# Main replay loop
 # ---------------------------------------------------------------------------
-_CTRL_BTN_SIZE = 32
 
-def _ctrl_button_layout(screen_w):
-    """Return list of (name, center_x, center_y) for control buttons."""
-    cy = HEADER_HEIGHT + 14 + 170 + 30
-    cx = 110
-    spacing = _CTRL_BTN_SIZE + 12
-    return [
-        ("rewind",  cx,               cy),
-        ("play",    cx + spacing,      cy),
-        ("forward", cx + 2 * spacing,  cy),
-    ]
-
-def draw_race_controls(screen, paused, speed, screen_w):
-    """Render play/pause/speed buttons."""
-    buttons = _ctrl_button_layout(screen_w)
-    fnt = get_font("Consolas", 11, bold=True)
-    for name, cx, cy in buttons:
-        r = _CTRL_BTN_SIZE // 2
-        pygame.draw.circle(screen, (30, 35, 45), (cx, cy), r)
-        pygame.draw.circle(screen, UI_BORDER, (cx, cy), r, 2)
-        if name == "play":
-            if paused:
-                # Triangle (play)
-                pygame.draw.polygon(screen, (200, 220, 255),
-                    [(cx - 5, cy - 7), (cx - 5, cy + 7), (cx + 7, cy)])
-            else:
-                # Pause bars
-                pygame.draw.rect(screen, (200, 220, 255), (cx - 5, cy - 6, 4, 12))
-                pygame.draw.rect(screen, (200, 220, 255), (cx + 1, cy - 6, 4, 12))
-        elif name == "rewind":
-            pygame.draw.polygon(screen, (180, 180, 190),
-                [(cx + 4, cy - 6), (cx + 4, cy + 6), (cx - 5, cy)])
-        elif name == "forward":
-            pygame.draw.polygon(screen, (180, 180, 190),
-                [(cx - 4, cy - 6), (cx - 4, cy + 6), (cx + 5, cy)])
-    # Speed label
-    spd_label = fnt.render(f"{speed:g}x", True, ACCENT_BLUE)
-    screen.blit(spd_label, (buttons[-1][1] + _CTRL_BTN_SIZE // 2 + 8, buttons[-1][2] - 7))
-    return buttons
-
-def handle_controls_click(mx, my, buttons, paused, speed, time_val):
-    """Check if a control button was clicked. Returns (paused, speed, time_val)."""
-    for name, cx, cy in buttons:
-        r = _CTRL_BTN_SIZE // 2
-        if (mx - cx) ** 2 + (my - cy) ** 2 <= r * r:
-            if name == "play":
-                paused = not paused
-            elif name == "rewind":
-                time_val -= 5.0
-            elif name == "forward":
-                time_val += 5.0
-            break
-    return paused, speed, time_val
+# Module-level state for click detection across frames
+_last_frame = []
+_last_lb = []
 
 
-# ---------------------------------------------------------------------------
-# Session info banner
-# ---------------------------------------------------------------------------
-def draw_session_info(screen, session_info, screen_w):
-    """Display circuit/country/date below the header."""
-    if not session_info:
-        return
-    fnt = get_font("Consolas", 11)
-    parts = []
-    if session_info.get("circuit"):
-        parts.append(session_info["circuit"])
-    if session_info.get("country"):
-        parts.append(session_info["country"])
-    if session_info.get("date"):
-        parts.append(str(session_info["date"])[:10])
-    if session_info.get("round"):
-        parts.append(f"R{session_info['round']}")
-    text = "  |  ".join(parts)
-    surf = fnt.render(text, True, (130, 130, 140))
-    screen.blit(surf, (22, HEADER_HEIGHT - 16))
+def run_replay(drivers_data, bounds, timeline, metadata):
+    global _last_frame, _last_lb
 
-
-# ---------------------------------------------------------------------------
-# Tyre health ring in leaderboard
-# ---------------------------------------------------------------------------
-def draw_tyre_health_ring(screen, cx, cy, radius, health_pct, compound_name):
-    """Draw a ring that depletes clockwise as health drops."""
-    col = tyre_compound_color(compound_name)
-    bg_col = (col[0] // 4, col[1] // 4, col[2] // 4)
-    # Background ring
-    pygame.draw.circle(screen, bg_col, (cx, cy), radius, 2)
-    # Health arc (approximate with line segments)
-    health = max(0, min(100, health_pct))
-    n_segs = max(1, int(24 * health / 100))
-    angle_span = 2 * math.pi * health / 100
-    start_angle = -math.pi / 2  # 12 o'clock
-    points = []
-    for i in range(n_segs + 1):
-        a = start_angle + angle_span * i / n_segs
-        px = cx + int(radius * math.cos(a))
-        py = cy + int(radius * math.sin(a))
-        points.append((px, py))
-    if len(points) > 1:
-        pygame.draw.lines(screen, col, False, points, 2)
-    # Inner dot with compound color
-    pygame.draw.circle(screen, col, (cx, cy), radius - 4)
-
-
-# ---------------------------------------------------------------------------
-# Status banner (SC / VSC / RED FLAG overlay)
-# ---------------------------------------------------------------------------
-def draw_status_banner(screen, status_code, screen_w):
-    """Show a prominent banner when track is under caution."""
-    label = _status_label(status_code)
-    if not label:
-        return
-    col = _STATUS_TRACK_COLORS.get(status_code, (200, 200, 200))
-    banner_h = 28
-    banner_y = HEADER_HEIGHT + 2
-    bg = pygame.Surface((screen_w - SIDEBAR_WIDTH, banner_h), pygame.SRCALPHA)
-    bg.fill((*col, 160))
-    screen.blit(bg, (0, banner_y))
-    fnt = get_font("Consolas", 16, bold=True)
-    surf = fnt.render(label, True, (255, 255, 255))
-    screen.blit(surf, ((screen_w - SIDEBAR_WIDTH) // 2 - surf.get_width() // 2, banner_y + 5))
-
-
-def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
-               track_statuses=None, rc_messages=None, weather_timeline=None, tyre_model=None):
     if not drivers_data or not timeline:
         print("❌ Replay Error: No driver data or timeline available.")
         return
 
     driver_info = metadata["driver_info"]
     total_laps = metadata.get("total_laps", 0)
-    fastest_driver = None
-    fastest_lap_time = None
 
-    # Get max speed for heatmap
-    max_speed = 1.0
+    # --- Precompute CumDist ---
     for drv_id, df in drivers_data.items():
-        if not df.empty and "Speed" in df.columns:
-            max_speed = max(max_speed, safe_float(df["Speed"].max(), 0))
+        if df.empty:
+            continue
+        coords = df[["X", "Y"]].values
+        diffs = coords[1:] - coords[:-1]
+        dists = np.sqrt((diffs ** 2).sum(axis=1))
+        dists = np.insert(dists, 0, 0)
+        df["CumDist"] = np.cumsum(dists)
 
-    # Estimate track length dynamically for lap calculation.
     max_total_dist = 0
     for df in drivers_data.values():
         if not df.empty and "CumDist" in df.columns:
@@ -1167,30 +442,31 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
     else:
         track_length_approx = 5000
 
+    global_max_speed = 1
+    for df in drivers_data.values():
+        if "Speed" in df.columns and not df.empty:
+            mx = df["Speed"].max()
+            if mx > global_max_speed:
+                global_max_speed = mx
+
     pygame.init()
     screen_size = (1280, 850)
     screen = pygame.display.set_mode(screen_size)
-    pygame.display.set_caption(f"F1 Telemetry Pro | {metadata.get('race_name', 'Race')}")
+    pygame.display.set_caption(
+        f"F1 Telemetry Pro | {metadata.get('race_name', 'Race')}")
     clock = pygame.time.Clock()
 
-    tag_font = get_font("Arial", 10, bold=True)
-    badge_font = get_font("Consolas", 10, bold=True)
+    font = pygame.font.SysFont("Consolas", 24, bold=True)
+    tag_font = pygame.font.SysFont("Arial", 10, bold=True)
 
-    track_segments = build_track_segments(drivers_data, bounds, screen_size)
+    track_points, track_speeds = build_track_points(
+        drivers_data, bounds, screen_size)
 
-    # --- Track geometry (inner/outer edges + normals) ---
-    _center_pts = [track_segments[0]["p1"]] + [s["p2"] for s in track_segments] if track_segments else []
-    from track_geo import build_track_edges as _bte, label_offset_from_normal
-    _inner_edge, _outer_edge, _track_normals = _bte(_center_pts, track_half_width=7) if len(_center_pts) > 2 else ([], [], [])
-
-    # Pre-compute spatial grid for O(1) label normal lookups
-    _normal_grid = {}
-    if _track_normals is not None and len(_track_normals) > 0 and len(_center_pts) > 0:
-        for _ni, pt in enumerate(_center_pts):
-            gx, gy = int(pt[0] / 20), int(pt[1] / 20)
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    _normal_grid[(gx + dx, gy + dy)] = _ni
+    try:
+        best_drv_df = max(drivers_data.items(), key=lambda x: len(x[1]))[1]
+        drs_segments = _detect_drs_zones(best_drv_df)
+    except Exception:
+        drs_segments = []
 
     time_val = timeline[0]
     total_time = timeline[-1]
@@ -1198,419 +474,279 @@ def run_replay(drivers_data, bounds, timeline, metadata, similarity_matrix=None,
     running = True
     paused = False
     speed = 1.0
-    show_heatmap = False
-    global _tyre_model_global
-    _tyre_model_global = tyre_model
-    gap_mode = "gap"
-    focused_driver = None
-    ghost_driver = None
-    show_similarity = False
-    sidebar_rects = {}
-    delta_history = deque(maxlen=240)
 
-    drv_colors = {drv: parse_team_color(info["TeamColor"]) for drv, info in driver_info.items()}
+    gap_mode = "leader"
+    focused_driver = None
+    show_heatmap = False
+    show_drs = False
+    show_telemetry = False
+
+    sector_flashes = {}
+    best_sectors = {}
+    overall_best_sectors = {}
+    prev_lap_per_driver = {}
+
+    fastest_lap_time = None
+    fastest_lap_driver = None
+
+    animated_y = {}
+
+    drv_colors = {}
+    for drv, info in driver_info.items():
+        try:
+            h = info["TeamColor"].lstrip("#")
+            drv_colors[drv] = tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+        except Exception:
+            drv_colors[drv] = (200, 200, 200)
+
     trails = {drv: deque(maxlen=TRAIL_LENGTH) for drv in drivers_data}
-    row_positions = {}
-    previous_order = []
-    active_overtakes = []
-    ot_cooldowns = {}
-    pit_entry_times = {}
-    show_rc_feed = False
-    ctrl_buttons = []
-    if track_statuses is None:
-        track_statuses = []
-    if rc_messages is None:
-        rc_messages = []
-    if weather_timeline is None:
-        weather_timeline = []
-    session_info = metadata.get("session_info", {})
+    trail_speeds = {drv: deque(maxlen=TRAIL_LENGTH) for drv in drivers_data}
+
+    def _reset_trails():
+        nonlocal trails, trail_speeds
+        trails = {drv: deque(maxlen=TRAIL_LENGTH) for drv in drivers_data}
+        trail_speeds = {drv: deque(maxlen=TRAIL_LENGTH) for drv in drivers_data}
 
     while running:
         screen.fill(BG_COLOR)
         dt = clock.get_time() / 1000.0
         screen_w, screen_h = screen.get_size()
-        pending_click = None
 
+        # ---- Events ----
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
 
             if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    running = False
                 if event.key == pygame.K_SPACE:
                     paused = not paused
-                if event.key == pygame.K_1:
+                elif event.key == pygame.K_1:
                     speed = 0.5
-                if event.key == pygame.K_2:
+                elif event.key == pygame.K_2:
                     speed = 1.0
-                if event.key == pygame.K_3:
+                elif event.key == pygame.K_3:
                     speed = 2.0
-                if event.key == pygame.K_e and focused_driver:
-                    import os
-                    lap = int(frame_by_driver[focused_driver]["lap"])
-                    drv = focused_driver
-                    lap_df = drivers_data[drv][drivers_data[drv]["LapNumber"] == lap].copy()
-                    if "LateralG" not in lap_df.columns:
-                        lap_df["LateralG"] = 0
-                    out_path = f"{drv}_lap{lap}.csv"
-                    lap_df[["CumDist","Speed","Throttle","Brake","LateralG"]].to_csv(out_path, index=False)
-                    print(f"✅ Exported {out_path}")
-                if event.key == pygame.K_4:
+                elif event.key == pygame.K_4:
                     speed = 4.0
-                if event.key == pygame.K_UP:
+                elif event.key == pygame.K_UP:
                     speed = min(speed + 0.5, 10.0)
-                if event.key == pygame.K_DOWN:
+                elif event.key == pygame.K_DOWN:
                     speed = max(speed - 0.5, 0.0)
-                if event.key == pygame.K_RIGHT:
+                elif event.key == pygame.K_RIGHT:
                     time_val += 5.0
-                    invalidate_fastest_lap_cache()
-                    previous_order = []
-                    active_overtakes = []
-                    ot_cooldowns = {}
-                if event.key == pygame.K_LEFT:
+                elif event.key == pygame.K_LEFT:
                     time_val -= 5.0
-                    invalidate_fastest_lap_cache()
-                    previous_order = []
-                    active_overtakes = []
-                    ot_cooldowns = {}
-                if event.key == pygame.K_h:
-                    show_heatmap = not show_heatmap
-                if event.key == pygame.K_m:
-                    show_rc_feed = not show_rc_feed
-                if event.key == pygame.K_s:
-                    show_similarity = not show_similarity
-                if event.key == pygame.K_g:
-                    gap_mode = "interval" if gap_mode == "gap" else "gap"
-                if event.key == pygame.K_f:
-                    focused_driver = None
-                    ghost_driver = None
-                    delta_history.clear()
-                if event.key == pygame.K_c:
-                    ghost_driver = None
-                    delta_history.clear()
-                if event.key == pygame.K_r:
+                elif event.key == pygame.K_r:
                     time_val = timeline[0]
-                    invalidate_fastest_lap_cache()
-                    trails = {drv: deque(maxlen=TRAIL_LENGTH) for drv in drivers_data}
-                    row_positions = {}
-                    delta_history.clear()
-                    previous_order = []
-                    active_overtakes = []
-                    ot_cooldowns = {}
+                    _reset_trails()
+                    sector_flashes.clear()
+                elif event.key == pygame.K_g:
+                    gap_mode = "interval" if gap_mode == "leader" else "leader"
+                elif event.key == pygame.K_h:
+                    show_heatmap = not show_heatmap
+                elif event.key == pygame.K_d:
+                    show_drs = not show_drs
+                elif event.key == pygame.K_t:
+                    show_telemetry = not show_telemetry
 
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 mx, my = pygame.mouse.get_pos()
-                if my > screen_h - SEEK_BAR_HEIGHT:
+                if my > screen_h - 20:
                     ratio = mx / screen_w
                     time_val = ratio * total_time
-                    invalidate_fastest_lap_cache()
-                    trails = {drv: deque(maxlen=TRAIL_LENGTH) for drv in drivers_data}
-                    delta_history.clear()
-                    previous_order = []
-                    active_overtakes = []
-                    ot_cooldowns = {}
+                    _reset_trails()
                 else:
-                    # Check race controls HUD buttons first
-                    _p, _s, _tv = handle_controls_click(mx, my, ctrl_buttons, paused, speed, time_val)
-                    if _p != paused or _tv != time_val:
-                        paused = _p
-                        time_val = _tv
+                    panel_x = screen_w - 240
+                    if mx >= panel_x:
+                        row_h_click = 36
+                        list_start_y_click = 70 + 40
+                        clicked_pos = int(
+                            (my - list_start_y_click) / row_h_click)
+                        if 0 <= clicked_pos < len(_last_lb):
+                            clicked_drv = _last_lb[clicked_pos]
+                            focused_driver = (
+                                None if focused_driver == clicked_drv
+                                else clicked_drv)
                     else:
-                        pending_click = (mx, my, bool(pygame.key.get_mods() & pygame.KMOD_SHIFT))
+                        clicked_any = False
+                        for fd in _last_frame:
+                            dx = mx - fd["sx"]
+                            dy = my - fd["sy"]
+                            if dx * dx + dy * dy < 144:
+                                focused_driver = (
+                                    None if focused_driver == fd["id"]
+                                    else fd["id"])
+                                clicked_any = True
+                                break
+                        if not clicked_any and mx < panel_x:
+                            focused_driver = None
 
+        # ---- Draw track ----
+        if len(track_points) > 1:
+            pygame.draw.lines(screen, TRACK_OUTLINE, False, track_points, 16)
+            pygame.draw.lines(screen, TRACK_COLOR, False, track_points, 6)
+
+        _draw_drs_zones(screen, track_points, drs_segments, show_drs)
+        _draw_speed_heatmap(screen, track_points, track_speeds, show_heatmap)
+
+        # ---- Advance time ----
         if not paused:
             time_val += dt * speed
             if time_val > total_time:
                 time_val = timeline[0]
-                invalidate_fastest_lap_cache()
-                trails = {drv: deque(maxlen=TRAIL_LENGTH) for drv in drivers_data}
-                delta_history.clear()
-                previous_order = []
-                active_overtakes = []
-                ot_cooldowns = {}
+                _reset_trails()
 
         time_val = max(timeline[0], min(time_val, total_time))
 
-        # --- UPDATE DRIVERS ---
+        # ---- Update drivers ----
         current_frame_data = []
-        frame_by_driver = {}
+        pit_drivers = set()
 
         for drv_code, df in drivers_data.items():
             if df.empty:
                 continue
+            (rx, ry, dist, lap, spd,
+             drs, throttle, brake, gear) = get_interpolated_state(df, time_val)
+            sx, sy = scale_point(rx, ry, bounds, screen_size)
 
-            state = get_interpolated_state(df, time_val)
-            gx, gy = scale_point(state["X"], state["Y"], bounds, screen_size)
-            info = driver_info.get(drv_code, {})
-            sector_flash = get_sector_flash(info, time_val)
-            drs_active = is_drs_active(state["DRS"])
-            in_pit_window = is_in_pit_window(info, time_val)
-            in_pit = state["Speed"] < 5 and (in_pit_window or not info.get("PitWindows")) and time_val > timeline[0] + 2
+            trails[drv_code].append((sx, sy))
+            trail_speeds[drv_code].append(spd)
 
-            trails[drv_code].append((gx, gy, state["Speed"]))
+            if spd < 5:
+                pit_drivers.add(drv_code)
 
-            frame_state = {
+            prev_lap = prev_lap_per_driver.get(drv_code, 0)
+            if lap != prev_lap and lap > 0:
+                flash_col = _check_sector_flash(
+                    driver_info, drv_code, prev_lap,
+                    prev_lap_per_driver, best_sectors, overall_best_sectors)
+                if flash_col:
+                    sector_flashes[drv_code] = (flash_col, time_val + 1.5)
+
+                drv_lap_times = driver_info.get(
+                    drv_code, {}).get("LapTimes", [])
+                for lt_rec in drv_lap_times:
+                    if (lt_rec["LapNumber"] == int(prev_lap)
+                            and lt_rec["LapTime"] > 0):
+                        if (fastest_lap_time is None
+                                or lt_rec["LapTime"] < fastest_lap_time):
+                            fastest_lap_time = lt_rec["LapTime"]
+                            fastest_lap_driver = drv_code
+            prev_lap_per_driver[drv_code] = lap
+
+            current_frame_data.append({
                 "id": drv_code,
-                "dist": state["CumDist"],
-                "lap": state["LapNumber"],
-                "gx": gx,
-                "gy": gy,
-                "sx": gx,
-                "sy": gy,
-                "speed": state["Speed"],
-                "throttle": state["Throttle"],
-                "brake": state["Brake"],
-                "gear": state["nGear"],
-                "drs": state["DRS"],
-                "drs_active": drs_active,
-                "in_pit": in_pit,
-                "sector_flash": sector_flash,
-            }
-            current_frame_data.append(frame_state)
-            frame_by_driver[drv_code] = frame_state
+                "dist": dist,
+                "lap": lap,
+                "sx": sx,
+                "sy": sy,
+                "speed": spd,
+                "drs": drs,
+                "throttle": throttle,
+                "brake": brake,
+                "gear": gear,
+            })
 
-        camera = build_camera(focused_driver, frame_by_driver, screen_size)
-        for frame_state in current_frame_data:
-            frame_state["sx"], frame_state["sy"] = apply_camera((frame_state["gx"], frame_state["gy"]), camera)
-
-        # Determine current track status
-        _cur_status = _get_track_status_at(track_statuses, time_val)
-        _status_col = _STATUS_TRACK_COLORS.get(_cur_status, TRACK_COLOR)
-        draw_track(screen, track_segments, show_heatmap, max_speed, camera, _status_col)
-
-        # Inner/outer edges (drawn on top of track for border effect)
-        if len(_inner_edge) > 2:
-            cam_inner = [apply_camera(p, camera) for p in _inner_edge]
-            cam_outer = [apply_camera(p, camera) for p in _outer_edge]
-            pygame.draw.lines(screen, (35, 35, 40), False, cam_inner, 2)
-            pygame.draw.lines(screen, (35, 35, 40), False, cam_outer, 2)
+        _last_frame = current_frame_data
 
         if current_frame_data:
             current_frame_data.sort(key=lambda x: x["dist"], reverse=True)
             leaderboard_order = [d["id"] for d in current_frame_data]
-
-            # --- OVERTAKE DETECTION ---
-            if previous_order and time_val > timeline[0] + 60.0:
-                for new_pos, drv in enumerate(leaderboard_order):
-                    if drv in previous_order:
-                        old_pos = previous_order.index(drv)
-                        if new_pos < old_pos:
-                            for passed_drv in previous_order[new_pos:old_pos]:
-                                if passed_drv in leaderboard_order:
-                                    if not frame_by_driver[drv]["in_pit"] and not frame_by_driver[passed_drv]["in_pit"]:
-                                        # Verify they are physically close to prevent glitch overtakes
-                                        if abs(frame_by_driver[drv]["dist"] - frame_by_driver[passed_drv]["dist"]) < 150:
-                                            pair = tuple(sorted([drv, passed_drv]))
-                                            if time_val - ot_cooldowns.get(pair, -999) > 10.0:
-                                                active_overtakes.append({
-                                                    "attacker": drv,
-                                                    "defender": passed_drv,
-                                                    "time": time_val
-                                                })
-                                                ot_cooldowns[pair] = time_val
-            previous_order = leaderboard_order.copy()
-            active_overtakes = [o for o in active_overtakes if 0 <= time_val - o["time"] < 4.0]
+            _last_lb = leaderboard_order
 
             leader_dist = current_frame_data[0]["dist"]
             current_lap = current_frame_data[0]["lap"]
-
             if current_lap == 0:
                 current_lap = int(leader_dist / track_length_approx) + 1
 
-            fastest_driver, fastest_lap_time, _ = get_live_fastest_lap_cached(driver_info, time_val)
-
             gaps = {}
-            intervals = {}
-            for pos, d in enumerate(current_frame_data):
-                gaps[d["id"]] = (leader_dist - d["dist"]) / 70.0
-                if pos == 0:
-                    intervals[d["id"]] = 0.0
-                else:
-                    car_ahead = current_frame_data[pos - 1]
-                    intervals[d["id"]] = (car_ahead["dist"] - d["dist"]) / 70.0
-
-            list_start_y = HEADER_HEIGHT + 40
-            row_h = 36
-            smoothing = min(1.0, dt / 0.3)
-            for pos, drv_id in enumerate(leaderboard_order):
-                target_y = list_start_y + (pos * row_h)
-                if drv_id not in row_positions:
-                    row_positions[drv_id] = target_y
-                else:
-                    row_positions[drv_id] = lerp(row_positions[drv_id], target_y, smoothing)
-
-            if pending_click:
-                clicked_driver = None
-                for drv_id, rect in sidebar_rects.items():
-                    if rect.collidepoint((pending_click[0], pending_click[1])):
-                        clicked_driver = drv_id
-                        break
-
-                is_shift_click = pending_click[2]
-                if clicked_driver is None:
-                    px, py = pending_click[0], pending_click[1]
-                    for d in current_frame_data:
-                        if math.hypot(px - d["sx"], py - d["sy"]) <= 16:
-                            clicked_driver = d["id"]
-                            break
-
-                if clicked_driver:
-                    show_similarity = False
-                    if is_shift_click:
-                        if focused_driver is None:
-                            focused_driver = clicked_driver
-                        elif clicked_driver != focused_driver:
-                            ghost_driver = None if ghost_driver == clicked_driver else clicked_driver
-                            delta_history.clear()
+            if gap_mode == "leader":
+                for d in current_frame_data:
+                    delta_m = leader_dist - d["dist"]
+                    gaps[d["id"]] = delta_m / 70.0
+            else:
+                for i, d in enumerate(current_frame_data):
+                    if i == 0:
+                        gaps[d["id"]] = 0
                     else:
-                        if focused_driver == clicked_driver:
-                            focused_driver = None
-                            ghost_driver = None
-                            delta_history.clear()
-                        else:
-                            focused_driver = clicked_driver
-                            if ghost_driver == clicked_driver:
-                                ghost_driver = None
-                            delta_history.clear()
+                        delta_m = (current_frame_data[i - 1]["dist"]
+                                   - d["dist"])
+                        gaps[d["id"]] = delta_m / 70.0
 
-                    camera = build_camera(focused_driver, frame_by_driver, screen_size)
-                    for frame_state in current_frame_data:
-                        frame_state["sx"], frame_state["sy"] = apply_camera((frame_state["gx"], frame_state["gy"]), camera)
+            draw_dashboard(
+                screen, font, time_val, speed, driver_info,
+                leaderboard_order, gaps, current_lap, total_laps, total_time,
+                gap_mode, focused_driver, fastest_lap_driver,
+                animated_y, pit_drivers, sector_flashes)
 
-            if focused_driver and ghost_driver and focused_driver in frame_by_driver and ghost_driver in frame_by_driver:
-                delta = (frame_by_driver[ghost_driver]["dist"] - frame_by_driver[focused_driver]["dist"]) / 70.0
-                delta_history.append(delta)
-
-            if ghost_driver in trails:
-                draw_ghost_trail(screen, trails[ghost_driver], drv_colors.get(ghost_driver, (220, 220, 220)), camera)
-
-            # Draw unfocused cars first, then comparison and focused cars on top.
-            draw_order = [d for d in current_frame_data if d["id"] not in (focused_driver, ghost_driver)]
-            draw_order += [d for d in current_frame_data if d["id"] == ghost_driver]
-            draw_order += [d for d in current_frame_data if d["id"] == focused_driver]
-
-            for d in draw_order:
-                drv_code = d["id"]
-                pts = trails[drv_code]
-                if len(pts) <= 1:
+            # ---- Draw trails ----
+            for drv_code in leaderboard_order:
+                pts = list(trails[drv_code])
+                spds = list(trail_speeds[drv_code])
+                if len(pts) < 2:
                     continue
 
-                base_color = drv_colors[drv_code]
-                is_dimmed = focused_driver is not None and drv_code not in (focused_driver, ghost_driver)
-                color = muted_color(base_color) if is_dimmed else base_color
+                c = drv_colors.get(drv_code, (200, 200, 200))
+                is_faded = (focused_driver is not None
+                            and drv_code != focused_driver)
+                if is_faded:
+                    c = (c[0] // 5, c[1] // 5, c[2] // 5)
 
                 for i in range(len(pts) - 1):
-                    p1 = apply_camera((pts[i][0], pts[i][1]), camera)
-                    p2 = apply_camera((pts[i + 1][0], pts[i + 1][1]), camera)
-                    width = trail_width(pts[i + 1][2], max_speed)
-                    if drv_code == focused_driver:
-                        pygame.draw.line(screen, (5, 5, 8), p1, p2, width + 4)
-                        width += 2
-                    pygame.draw.line(screen, color, p1, p2, width)
+                    spd_ratio = (spds[i] / global_max_speed
+                                 if global_max_speed > 0 else 0.5)
+                    th = max(1, int(
+                        _lerp(1, 5, spd_ratio) * (i / len(pts))))
+                    pygame.draw.line(screen, c, pts[i], pts[i + 1], th)
 
-            for d in draw_order:
-                drv_id = d["id"]
-                c = drv_colors[drv_id]
-                is_dimmed = focused_driver is not None and drv_id not in (focused_driver, ghost_driver)
-                if is_dimmed:
-                    c = muted_color(c)
-
+            # ---- Draw driver dots ----
+            for d in current_frame_data:
+                c = drv_colors.get(d["id"], (200, 200, 200))
                 sx, sy = d["sx"], d["sy"]
-                radius = 9 if drv_id == focused_driver else 7
 
-                if drv_id == ghost_driver:
-                    pygame.draw.circle(screen, (245, 245, 245), (sx, sy), 13, width=2)
-                if drv_id == focused_driver:
-                    pygame.draw.circle(screen, ACCENT_BLUE, (sx, sy), 14, width=2)
+                is_faded = (focused_driver is not None
+                            and d["id"] != focused_driver)
+                am = 0.2 if is_faded else 1.0
 
-                sector_flash = d.get("sector_flash")
-                if sector_flash:
-                    pulse = 0.5 + 0.5 * math.sin(time_val * 18)
-                    sector_color = lerp_color(c, sector_flash["color"], 0.65 + 0.35 * pulse)
-                    pygame.draw.circle(screen, sector_color, (sx, sy), radius + 8, width=3)
-                    c = sector_color
+                dot_c = (int(c[0] * am), int(c[1] * am), int(c[2] * am))
+                outer_c = (0, 0, 0) if not is_faded else (5, 5, 5)
+                inner_c = (int(255 * am), int(255 * am), int(255 * am))
 
-                if d["in_pit"]:
-                    flash = 0.5 + 0.5 * math.sin(time_val * 7)
-                    pit_color = lerp_color((120, 80, 10), PIT_YELLOW, flash)
-                    pygame.draw.circle(screen, pit_color, (sx, sy), radius + 5, width=3)
+                flash_entry = sector_flashes.get(d["id"])
+                if flash_entry and time_val < flash_entry[1]:
+                    pulse = 0.5 + 0.5 * np.sin(
+                        (time_val - (flash_entry[1] - 1.5)) * 8)
+                    dot_c = _lerp_color(dot_c, flash_entry[0], pulse)
 
-                pygame.draw.circle(screen, (0, 0, 0), (sx, sy), radius + 2)
-                pygame.draw.circle(screen, c, (sx, sy), radius)
-                pygame.draw.circle(screen, (255, 255, 255), (sx, sy), 2)
+                drs_active = int(d.get("drs", 0)) >= 10
 
-                label_color = (105, 105, 105) if is_dimmed else (230, 230, 230)
-                lbl = tag_font.render(driver_info[drv_id]["Abbreviation"], True, label_color)
-                # Position label using track normals when available
-                _lbl_dx, _lbl_dy = 12, -12
-                if _track_normals is not None and len(_track_normals) > 0:
-                    gx, gy = d.get("gx", sx), d.get("gy", sy)
-                    cell = (int(gx / 20), int(gy / 20))
-                    _best_ni = _normal_grid.get(cell)
-                    if _best_ni is not None and _best_ni < len(_track_normals):
-                        _lbl_dx, _lbl_dy = label_offset_from_normal(_track_normals[_best_ni], 30)
-                screen.blit(lbl, (sx + _lbl_dx, sy + _lbl_dy))
+                pygame.draw.circle(screen, outer_c, (sx, sy), 9)
+                pygame.draw.circle(screen, dot_c, (sx, sy), 7)
+                pygame.draw.circle(screen, inner_c, (sx, sy), 2)
 
-                badge_y = sy + 4
-                if d["drs_active"]:
-                    draw_badge(screen, "DRS", badge_font, sx + 12, badge_y, (0, 40, 8), DRS_GREEN)
-                    badge_y += 16
-                if d["in_pit"]:
-                    if d["id"] not in pit_entry_times:
-                        pit_entry_times[d["id"]] = time_val
-                    dur = time_val - pit_entry_times[d["id"]]
-                    if dur < 120:
-                        draw_badge(screen, f"PIT {dur:.1f}s", badge_font, sx + 12, badge_y, (30, 20, 0), PIT_YELLOW)
-                    else:
-                        draw_badge(screen, "OUT", badge_font, sx + 12, badge_y, (30, 0, 0), (255, 60, 60))
-                    badge_y += 16
-                else:
-                    pit_entry_times.pop(d["id"], None)
-                    
-                if d.get("sector_flash"):
-                    flash_info = d["sector_flash"]
-                    draw_badge(screen, flash_info["label"], badge_font, sx + 12, badge_y, (20, 20, 25), flash_info["color"])
+                if drs_active and show_drs:
+                    pts_diamond = [
+                        (sx, sy - 13), (sx + 4, sy - 9),
+                        (sx, sy - 5), (sx - 4, sy - 9)]
+                    pygame.draw.polygon(screen, (0, 220, 80), pts_diamond)
 
-            pit_drivers = {d["id"]: (time_val - pit_entry_times[d["id"]]) for d in current_frame_data if d["in_pit"]}
-            drs_drivers = {d["id"] for d in current_frame_data if d["drs_active"]}
+                if not is_faded:
+                    lbl = tag_font.render(
+                        driver_info.get(d["id"], {}).get(
+                            "Abbreviation", "???"),
+                        True, (220, 220, 220))
+                    screen.blit(lbl, (sx + 12, sy - 12))
 
-            draw_minimap(screen, track_segments, current_frame_data, focused_driver, ghost_driver, drv_colors)
-            draw_delta_panel(screen, focused_driver, ghost_driver, driver_info, frame_by_driver, delta_history)
-            draw_telemetry_overlay(screen, focused_driver, driver_info, frame_by_driver, max_speed)
-            if show_similarity and focused_driver:
-                sidebar_rects = draw_similarity_panel(screen, focused_driver, driver_info, similarity_matrix)
-            else:
-                sidebar_rects = draw_dashboard(
-                    screen,
-                    time_val,
-                    speed,
-                    driver_info,
-                    leaderboard_order,
-                    gaps,
-                    intervals,
-                    current_lap,
-                    total_laps,
-                    total_time,
-                    gap_mode,
-                    focused_driver,
-                    fastest_driver,
-                    fastest_lap_time,
-                    pit_drivers,
-                    drs_drivers,
-                    row_positions,
-                    active_overtakes,
-                    frame_by_driver
-                )
-            draw_progress_bar_with_markers(screen, time_val, total_time, screen_w, screen_h,
-                                           track_statuses, rc_messages, driver_info)
+            if show_telemetry and focused_driver:
+                for d in current_frame_data:
+                    if d["id"] == focused_driver:
+                        _draw_telemetry_bar(
+                            screen, font, d, screen_w, screen_h)
+                        break
 
-        # --- New Tier-1 overlays ---
-        draw_status_banner(screen, _cur_status, screen_w)
-        draw_weather_panel(screen, weather_timeline, time_val, focused_driver)
-        draw_race_control_feed(screen, rc_messages, time_val, screen_w, show_rc_feed, show_similarity)
-        draw_session_info(screen, session_info, screen_w)
-        ctrl_buttons = draw_race_controls(screen, paused, speed, screen_w)
+        expired = [k for k, v in sector_flashes.items() if time_val >= v[1]]
+        for k in expired:
+            del sector_flashes[k]
 
         pygame.display.flip()
         clock.tick(60)

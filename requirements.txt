@@ -1,8 +1,0 @@
-# Core dependencies for the F1 Telemetry Replay engine.
-# Pinned to the versions the project is developed and tested against.
-
-fastf1==3.7.0        # Official F1 timing/telemetry data access
-pygame==2.6.1        # Real-time rendering and playback UI
-matplotlib==3.9.4    # Colormaps and plotting helpers
-pandas==2.3.3        # Telemetry/lap dataframes
-numpy==2.0.2         # Vectorised math (trails, DTW, geometry)
