@@ -143,6 +143,50 @@ export interface Events {
   moments: Moment[];
 }
 
+export interface PitStop {
+  lap: number;
+  compound: string;
+}
+
+export interface EngineerDecision {
+  lap: number;
+  call: string;
+  compound: string;
+  reason: string;
+  confidence: number;
+}
+
+export interface EngineerAgreement {
+  stopsMatched: number;
+  actualStops: number;
+  aiStops: number;
+  compoundMatched: number;
+  pct: number;
+  avgLapDelta: number;
+}
+
+export interface EngineerDriver {
+  code: string;
+  name: string;
+  team: string;
+  color: string;
+  finishPos: number;
+  startCompound: string;
+  actualStints: Stint[];
+  aiStops: PitStop[];
+  actualStops: PitStop[];
+  decisions: EngineerDecision[];
+  agreement: EngineerAgreement;
+  verdict: string;
+}
+
+export interface Engineer {
+  source: string;
+  model: string;
+  note: string;
+  drivers: EngineerDriver[];
+}
+
 export interface RaceData {
   meta: Meta;
   frames: Frames;
@@ -150,4 +194,5 @@ export interface RaceData {
   traces: Traces;
   analytics: Analytics;
   events: Events;
+  engineer: Engineer;
 }

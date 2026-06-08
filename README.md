@@ -53,6 +53,12 @@ so a full race exports to **~5 MB** of JSON.
   gap-to-leader evolution chart.
 - **Compare** — pick two drivers for a distance-aligned delta-time curve and
   overlaid speed/throttle traces from their quickest laps.
+- **AI Engineer** — an independent strategist makes pit calls lap by lap (tyre
+  life, pit loss, undercuts, box-under-safety-car) and is graded against what
+  each driver actually did, with reasons and a verdict. Decisions are
+  deterministic and reproducible; set `GROQ_API_KEY` to have **Llama** (Groq's
+  free tier) write the verdicts. On 2021 Abu Dhabi the engine independently
+  reproduces Verstappen's three stops, including the lap-54 switch to softs.
 
 ---
 
@@ -68,6 +74,9 @@ pip install -r requirements.txt
 python -m pipeline.export --year 2021 --race "Abu Dhabi"
 # any race works:
 python -m pipeline.export --year 2023 --race "Brazil"
+
+# optional: AI Engineer verdicts written by Llama (Groq free tier)
+export GROQ_API_KEY=...   # then re-run the export above
 ```
 
 ### 2. Run the web app

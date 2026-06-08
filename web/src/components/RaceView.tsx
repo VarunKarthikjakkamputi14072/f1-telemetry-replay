@@ -15,18 +15,20 @@ import StatusBar from "./StatusBar";
 import StrategyTab from "./tabs/StrategyTab";
 import PaceTab from "./tabs/PaceTab";
 import CompareTab from "./tabs/CompareTab";
+import EngineerTab from "./tabs/EngineerTab";
 
-type Tab = "replay" | "strategy" | "pace" | "compare";
+type Tab = "replay" | "strategy" | "pace" | "compare" | "engineer";
 const SPEEDS = [0.5, 1, 2, 4, 8];
 const TABS: { id: Tab; label: string }[] = [
   { id: "replay", label: "Replay" },
   { id: "strategy", label: "Strategy" },
   { id: "pace", label: "Pace" },
   { id: "compare", label: "Compare" },
+  { id: "engineer", label: "AI Engineer" },
 ];
 
 export default function RaceView({ data }: { data: RaceData }) {
-  const { meta, frames, laps, traces, analytics, events } = data;
+  const { meta, frames, laps, traces, analytics, events, engineer } = data;
   const [tab, setTab] = useState<Tab>("replay");
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeed] = useState(2);
@@ -360,6 +362,9 @@ export default function RaceView({ data }: { data: RaceData }) {
       )}
       {tab === "pace" && <PaceTab meta={meta} analytics={analytics} />}
       {tab === "compare" && <CompareTab meta={meta} traces={traces} />}
+      {tab === "engineer" && (
+        <EngineerTab engineer={engineer} totalLaps={meta.totalLaps} />
+      )}
     </main>
   );
 }
