@@ -71,11 +71,17 @@ const ReplayCanvas = forwardRef<ReplayHandle, Props>(function ReplayCanvas(
     const ro = new ResizeObserver(() => {
       const r = parent.getBoundingClientRect();
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const bw = Math.round(r.width * dpr);
+      const bh = Math.round(r.height * dpr);
+      // Only touch the backing store when it actually changes. The canvas is
+      // position:absolute (out of flow), so we never set its CSS size here —
+      // that previously fed back into the aspect-ratio parent and made the
+      // view zoom unboundedly. CSS sizing is left to the stylesheet.
+      if (canvas.width !== bw || canvas.height !== bh) {
+        canvas.width = bw;
+        canvas.height = bh;
+      }
       sizeRef.current = { w: r.width, h: r.height, dpr };
-      canvas.width = Math.round(r.width * dpr);
-      canvas.height = Math.round(r.height * dpr);
-      canvas.style.width = `${r.width}px`;
-      canvas.style.height = `${r.height}px`;
       // Redraw immediately so the scene survives resizes and shows before
       // the first animation frame (and in environments that throttle rAF).
       drawRef.current(lastRef.current.frame, lastRef.current.focused);
@@ -252,7 +258,7 @@ const ReplayCanvas = forwardRef<ReplayHandle, Props>(function ReplayCanvas(
     <canvas
       ref={canvasRef}
       onClick={handleClick}
-      className="h-full w-full cursor-pointer"
+      className="absolute inset-0 h-full w-full cursor-pointer"
     />
   );
 });

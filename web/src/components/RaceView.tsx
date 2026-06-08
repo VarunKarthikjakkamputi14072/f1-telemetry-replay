@@ -3,12 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { RaceData } from "@/lib/types";
-import {
-  computeStandings,
-  leaderLap,
-  sampleDriver,
-  type Standing,
-} from "@/lib/raceEngine";
+import { sampleDriver } from "@/lib/raceEngine";
+import { prepTower, evalTower } from "@/lib/timingTower";
 import { fmtClock } from "@/lib/format";
 import ReplayCanvas, { type ReplayHandle } from "./ReplayCanvas";
 import Leaderboard from "./Leaderboard";
@@ -28,8 +24,6 @@ const TABS: { id: Tab; label: string }[] = [
 
 export default function RaceView({ data }: { data: RaceData }) {
   const { meta, frames, laps, traces, analytics } = data;
-  const codes = useMemo(() => meta.drivers.map((d) => d.code), [meta]);
-
   const [tab, setTab] = useState<Tab>("replay");
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeed] = useState(2);
@@ -43,19 +37,17 @@ export default function RaceView({ data }: { data: RaceData }) {
   const speedRef = useRef(speed);
   const focusedRef = useRef(focused);
   const tabRef = useRef(tab);
-  playingRef.current = playing;
-  speedRef.current = speed;
-  focusedRef.current = focused;
-  tabRef.current = tab;
+  // Mirror the latest UI state into refs the rAF loop / handlers read, without
+  // touching refs during render.
+  useEffect(() => {
+    playingRef.current = playing;
+    speedRef.current = speed;
+    focusedRef.current = focused;
+    tabRef.current = tab;
+  }, [playing, speed, focused, tab]);
 
-  const totalDist = useMemo(() => {
-    let m = 0;
-    for (const d of Object.values(frames.drivers)) {
-      const last = d.dist[d.dist.length - 1] ?? 0;
-      if (last > m) m = last;
-    }
-    return m;
-  }, [frames]);
+  // Per-driver official timing timelines (built once).
+  const towerPrep = useMemo(() => prepTower(laps, analytics), [laps, analytics]);
 
   const fastestLap = useMemo(() => {
     let best: { code: string; t: number } | null = null;
@@ -113,11 +105,20 @@ export default function RaceView({ data }: { data: RaceData }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [frames]);
 
-  const standings: Standing[] = useMemo(
-    () => computeStandings(frames, codes, uiFrame),
-    [frames, codes, uiFrame],
-  );
-  const curLap = leaderLap(standings, totalDist, meta.totalLaps);
+  const tNow = frames.t0 + uiFrame * frames.step;
+  const pitOf = (code: string) => {
+    const d = frames.drivers[code];
+    const s = d ? sampleDriver(d, uiFrame) : null;
+    return s ? s.spd < 35 : false;
+  };
+  const standings = evalTower(towerPrep, tNow, pitOf);
+
+  // Leader's current lap = laps they've completed + 1.
+  const leaderCode = standings[0]?.code;
+  const completed = leaderCode
+    ? (towerPrep.byCode[leaderCode] ?? []).filter((p) => p.t <= tNow).length
+    : 0;
+  const curLap = Math.min(meta.totalLaps, completed + 1);
   const elapsed = uiFrame * frames.step;
 
   const focusedSample =

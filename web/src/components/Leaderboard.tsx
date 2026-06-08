@@ -1,12 +1,12 @@
 "use client";
 
-import type { Standing } from "@/lib/raceEngine";
+import type { TowerEntry } from "@/lib/timingTower";
 import type { Meta } from "@/lib/types";
 import { fmtGap } from "@/lib/format";
 
 interface Props {
   meta: Meta;
-  standings: Standing[];
+  standings: TowerEntry[];
   focused: string | null;
   fastestLap: string | null;
   gapMode: "leader" | "interval";
