@@ -272,6 +272,36 @@ def build_traces(session, drivers):
     return out
 
 
+def build_mini_sectors(traces, color_map, n=20):
+    """
+    Split the lap into `n` equal-distance mini-sectors and find, from each
+    driver's fastest lap, who is quickest through each one (time = ∫ dx / v).
+    Returns one entry per sector with the owning driver and their team colour —
+    the classic broadcast "purple-sector dominance" map.
+    """
+    band_times = [dict() for _ in range(n)]
+    for code, tr in traces.items():
+        dist, spd = tr["dist"], tr["spd"]
+        if len(dist) < 2:
+            continue
+        span = dist[-1] - dist[0]
+        if span <= 0:
+            continue
+        for i in range(len(dist) - 1):
+            b = min(n - 1, int((dist[i] - dist[0]) / span * n))
+            v = max(10.0, (spd[i] + spd[i + 1]) / 2) / 3.6
+            band_times[b][code] = band_times[b].get(code, 0.0) + (dist[i + 1] - dist[i]) / v
+    sectors = []
+    for bt in band_times:
+        if not bt:
+            sectors.append({"owner": None, "color": "#888", "t": None})
+            continue
+        owner = min(bt, key=bt.get)
+        sectors.append({"owner": owner, "color": color_map.get(owner, "#888"),
+                        "t": round(bt[owner], 3)})
+    return sectors
+
+
 def _num_for(drivers, code):
     return drivers[code]["num"]
 
@@ -487,6 +517,9 @@ def main():
     out_dir = os.path.join(WEB_DATA, str(args.year), str(rnd))
 
     meta = build_meta(session, drivers, bounds, args.year)
+    traces = build_traces(session, drivers)
+    meta["miniSectors"] = build_mini_sectors(
+        traces, {d["code"]: d["color"] for d in meta["drivers"]})
     analytics = build_analytics(drivers)
     events = build_events(session, drivers)
     sizes = {
@@ -495,8 +528,7 @@ def main():
                                    build_frames(drivers, args.step)),
         "laps.json": write_json(os.path.join(out_dir, "laps.json"),
                                  {c: d["laps"] for c, d in drivers.items()}),
-        "traces.json": write_json(os.path.join(out_dir, "traces.json"),
-                                   build_traces(session, drivers)),
+        "traces.json": write_json(os.path.join(out_dir, "traces.json"), traces),
         "analytics.json": write_json(os.path.join(out_dir, "analytics.json"),
                                       analytics),
         "events.json": write_json(os.path.join(out_dir, "events.json"), events),

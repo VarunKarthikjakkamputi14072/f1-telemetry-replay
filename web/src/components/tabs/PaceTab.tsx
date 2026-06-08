@@ -11,6 +11,7 @@ import {
   YAxis,
 } from "recharts";
 import type { Analytics, Meta } from "@/lib/types";
+import MiniSectorMap from "../MiniSectorMap";
 
 interface Props {
   meta: Meta;
@@ -70,6 +71,8 @@ export default function PaceTab({ meta, analytics }: Props) {
 
   return (
     <div className="space-y-4">
+      <MiniSectorMap meta={meta} />
+
       <div className="panel p-5">
         <h2 className="text-lg font-bold">Position changes</h2>
         <p className="mb-4 text-sm text-muted-2">

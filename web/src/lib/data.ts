@@ -27,7 +27,9 @@ export async function getRaceData(
   round: string | number,
 ): Promise<RaceData> {
   const base = `/data/${year}/${round}`;
-  const hard: RequestCache = "force-cache";
+  // "default" lets the browser/CDN revalidate via ETag — instant on repeat
+  // visits in production, but never serves a stale file after a re-export.
+  const hard: RequestCache = "default";
   const [meta, frames, laps, traces, analytics, events, engineer] =
     await Promise.all([
       getJSON<Meta>(`${base}/meta.json`, hard),

@@ -15,6 +15,12 @@ export interface Corner {
   y: number;
 }
 
+export interface MiniSector {
+  owner: string | null;
+  color: string;
+  t: number | null;
+}
+
 export interface Meta {
   year: number;
   round: number;
@@ -27,6 +33,7 @@ export interface Meta {
   startFinish: [number, number] | null;
   corners: Corner[];
   drivers: DriverMeta[];
+  miniSectors?: MiniSector[];
 }
 
 export interface DriverFrames {
