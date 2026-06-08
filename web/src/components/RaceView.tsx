@@ -6,9 +6,12 @@ import type { RaceData } from "@/lib/types";
 import { sampleDriver } from "@/lib/raceEngine";
 import { prepTower, computeTower } from "@/lib/timingTower";
 import { fmtClock } from "@/lib/format";
+import { flagAt, weatherAt } from "@/lib/eventsUtil";
 import ReplayCanvas, { type ReplayHandle } from "./ReplayCanvas";
 import Leaderboard from "./Leaderboard";
 import TelemetryBars from "./TelemetryBars";
+import Timeline from "./Timeline";
+import StatusBar from "./StatusBar";
 import StrategyTab from "./tabs/StrategyTab";
 import PaceTab from "./tabs/PaceTab";
 import CompareTab from "./tabs/CompareTab";
@@ -23,15 +26,17 @@ const TABS: { id: Tab; label: string }[] = [
 ];
 
 export default function RaceView({ data }: { data: RaceData }) {
-  const { meta, frames, laps, traces, analytics } = data;
+  const { meta, frames, laps, traces, analytics, events } = data;
   const [tab, setTab] = useState<Tab>("replay");
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeed] = useState(2);
   const [uiFrame, setUiFrame] = useState(0);
   const [focused, setFocused] = useState<string | null>(null);
   const [gapMode, setGapMode] = useState<"leader" | "interval">("leader");
+  const [onboard, setOnboard] = useState(false);
 
   const replayRef = useRef<ReplayHandle>(null);
+  const onboardRef = useRef(onboard);
   const frameRef = useRef(0);
   const playingRef = useRef(playing);
   const speedRef = useRef(speed);
@@ -44,7 +49,8 @@ export default function RaceView({ data }: { data: RaceData }) {
     speedRef.current = speed;
     focusedRef.current = focused;
     tabRef.current = tab;
-  }, [playing, speed, focused, tab]);
+    onboardRef.current = onboard;
+  }, [playing, speed, focused, tab, onboard]);
 
   // Per-driver official timing timelines (built once).
   const towerPrep = useMemo(() => prepTower(laps, analytics), [laps, analytics]);
@@ -87,7 +93,11 @@ export default function RaceView({ data }: { data: RaceData }) {
         if (frameRef.current >= frames.n - 1) frameRef.current = 0;
       }
       if (tabRef.current === "replay") {
-        replayRef.current?.draw(frameRef.current, focusedRef.current);
+        replayRef.current?.draw(
+          frameRef.current,
+          focusedRef.current,
+          onboardRef.current,
+        );
       }
       if (ts - lastUi > 60) {
         lastUi = ts;
@@ -142,11 +152,24 @@ export default function RaceView({ data }: { data: RaceData }) {
       : null;
   const focusedMeta = meta.drivers.find((d) => d.code === focused);
 
+  // Race control + weather at the current replay moment.
+  const flag = flagAt(events.trackStatus, tNow);
+  const weather = weatherAt(events.weather, tNow);
+
+  // Live battle context for the focused driver (car ahead / behind right now).
+  const focusIdx = standings.findIndex((s) => s.code === focused);
+  const carAhead = focusIdx > 0 ? standings[focusIdx - 1] : null;
+  const carBehind =
+    focusIdx >= 0 && focusIdx < standings.length - 1
+      ? standings[focusIdx + 1]
+      : null;
+  const focusStanding = focusIdx >= 0 ? standings[focusIdx] : null;
+
   const seek = (frame: number) => {
     frameRef.current = frame;
     setUiFrame(frame);
     // Redraw at once so scrubbing is responsive even while paused.
-    replayRef.current?.draw(frame, focusedRef.current);
+    replayRef.current?.draw(frame, focusedRef.current, onboardRef.current);
   };
 
   return (
@@ -200,6 +223,25 @@ export default function RaceView({ data }: { data: RaceData }) {
                   <span className="text-muted-2"> / {meta.totalLaps}</span>
                 </span>
               </div>
+              <div className="absolute right-3 top-3 z-10 flex items-center gap-2">
+                <StatusBar flag={flag} weather={weather} />
+                <button
+                  onClick={() => setOnboard((o) => !o)}
+                  disabled={!focused}
+                  title={
+                    focused
+                      ? "Follow the focused car"
+                      : "Focus a car to enable onboard"
+                  }
+                  className={`rounded-md border px-2 py-1 text-xs transition disabled:opacity-40 ${
+                    onboard && focused
+                      ? "border-accent bg-accent/20 text-text"
+                      : "border-border text-muted hover:text-text"
+                  }`}
+                >
+                  Onboard
+                </button>
+              </div>
               <ReplayCanvas
                 ref={replayRef}
                 meta={meta}
@@ -225,14 +267,16 @@ export default function RaceView({ data }: { data: RaceData }) {
               >
                 ↺
               </button>
-              <input
-                type="range"
-                min={0}
-                max={frames.n - 1}
-                value={Math.round(uiFrame)}
-                onChange={(e) => seek(Number(e.target.value))}
-                className="h-1 flex-1 cursor-pointer accent-accent"
-              />
+              <div className="flex-1">
+                <Timeline
+                  t0={frames.t0}
+                  step={frames.step}
+                  n={frames.n}
+                  events={events}
+                  uiFrame={uiFrame}
+                  onSeek={seek}
+                />
+              </div>
               <div className="flex gap-1">
                 {SPEEDS.map((s) => (
                   <button
@@ -251,7 +295,42 @@ export default function RaceView({ data }: { data: RaceData }) {
             </div>
 
             {focusedMeta && focusedSample ? (
-              <TelemetryBars driver={focusedMeta} sample={focusedSample} />
+              <div className="flex flex-col gap-2">
+                <TelemetryBars driver={focusedMeta} sample={focusedSample} />
+                {focusStanding && (
+                  <div className="panel flex items-center justify-between px-3 py-2 text-xs">
+                    <span className="text-muted-2">
+                      Ahead:{" "}
+                      {carAhead ? (
+                        <span className="tnum text-text">
+                          {carAhead.code}{" "}
+                          {focusStanding.intLaps > 0
+                            ? `+${focusStanding.intLaps}L`
+                            : `+${focusStanding.interval.toFixed(2)}s`}
+                        </span>
+                      ) : (
+                        <span className="text-good">Race leader</span>
+                      )}
+                    </span>
+                    <span className="tnum font-bold text-text">
+                      P{focusStanding.pos}
+                    </span>
+                    <span className="text-muted-2">
+                      Behind:{" "}
+                      {carBehind ? (
+                        <span className="tnum text-text">
+                          {carBehind.code}{" "}
+                          {carBehind.intLaps > 0
+                            ? `+${carBehind.intLaps}L`
+                            : `+${carBehind.interval.toFixed(2)}s`}
+                        </span>
+                      ) : (
+                        <span className="text-muted-2">—</span>
+                      )}
+                    </span>
+                  </div>
+                )}
+              </div>
             ) : (
               <div className="panel px-3 py-2.5 text-center text-xs text-muted-2">
                 Click a car or a timing row to lock telemetry · Space to

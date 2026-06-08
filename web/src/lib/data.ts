@@ -1,5 +1,6 @@
 import type {
   Analytics,
+  Events,
   Frames,
   Laps,
   Manifest,
@@ -23,12 +24,13 @@ export async function getRaceData(
   round: string | number,
 ): Promise<RaceData> {
   const base = `/data/${year}/${round}`;
-  const [meta, frames, laps, traces, analytics] = await Promise.all([
+  const [meta, frames, laps, traces, analytics, events] = await Promise.all([
     getJSON<Meta>(`${base}/meta.json`),
     getJSON<Frames>(`${base}/frames.json`),
     getJSON<Laps>(`${base}/laps.json`),
     getJSON<Traces>(`${base}/traces.json`),
     getJSON<Analytics>(`${base}/analytics.json`),
+    getJSON<Events>(`${base}/events.json`),
   ]);
-  return { meta, frames, laps, traces, analytics };
+  return { meta, frames, laps, traces, analytics, events };
 }

@@ -11,7 +11,7 @@ import type { Meta, Frames } from "@/lib/types";
 import { sampleDriver } from "@/lib/raceEngine";
 
 export interface ReplayHandle {
-  draw: (frame: number, focused: string | null) => void;
+  draw: (frame: number, focused: string | null, onboard?: boolean) => void;
 }
 
 interface Props {
@@ -49,13 +49,16 @@ const ReplayCanvas = forwardRef<ReplayHandle, Props>(function ReplayCanvas(
   // Screen positions of cars from the last draw, for click hit-testing.
   const hitRef = useRef<{ code: string; sx: number; sy: number }[]>([]);
   // Last drawn state, so we can redraw on resize / mount without the rAF loop.
-  const lastRef = useRef<{ frame: number; focused: string | null }>({
+  const lastRef = useRef<{ frame: number; focused: string | null; onboard: boolean }>({
     frame: 0,
     focused: null,
+    onboard: false,
   });
-  const drawRef = useRef<(frame: number, focused: string | null) => void>(
-    () => {},
-  );
+  const drawRef = useRef<
+    (frame: number, focused: string | null, onboard: boolean) => void
+  >(() => {});
+  // Smoothly-followed camera: center point (in base-projection px) and zoom.
+  const camRef = useRef({ cx: 0, cy: 0, z: 1, init: false });
 
   useEffect(() => {
     const colors: Record<string, [number, number, number]> = {};
@@ -84,7 +87,11 @@ const ReplayCanvas = forwardRef<ReplayHandle, Props>(function ReplayCanvas(
       sizeRef.current = { w: r.width, h: r.height, dpr };
       // Redraw immediately so the scene survives resizes and shows before
       // the first animation frame (and in environments that throttle rAF).
-      drawRef.current(lastRef.current.frame, lastRef.current.focused);
+      drawRef.current(
+        lastRef.current.frame,
+        lastRef.current.focused,
+        lastRef.current.onboard,
+      );
     });
     ro.observe(parent);
     return () => ro.disconnect();
@@ -106,15 +113,41 @@ const ReplayCanvas = forwardRef<ReplayHandle, Props>(function ReplayCanvas(
   }, [meta.bounds]);
 
   const draw = useCallback(
-    (frame: number, focused: string | null) => {
+    (frame: number, focused: string | null, onboard = false) => {
       const canvas = canvasRef.current;
       const { w, h, dpr } = sizeRef.current;
       if (!canvas || w === 0) return;
-      lastRef.current = { frame, focused };
+      lastRef.current = { frame, focused, onboard };
       const ctx = canvas.getContext("2d")!;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, w, h);
-      const { sx, sy } = project();
+      const base = project();
+
+      // --- Camera: follow the focused car in onboard mode, else fit-to-track ---
+      const focusDf = focused ? frames.drivers[focused] : null;
+      const focusSample = focusDf ? sampleDriver(focusDf, frame) : null;
+      const cam = camRef.current;
+      let tcx = w / 2;
+      let tcy = h / 2;
+      let tz = 1;
+      if (onboard && focusSample) {
+        tcx = base.sx(focusSample.x);
+        tcy = base.sy(focusSample.y);
+        tz = 2.4;
+      }
+      if (!cam.init) {
+        cam.cx = tcx;
+        cam.cy = tcy;
+        cam.z = tz;
+        cam.init = true;
+      } else {
+        const k = 0.18;
+        cam.cx += (tcx - cam.cx) * k;
+        cam.cy += (tcy - cam.cy) * k;
+        cam.z += (tz - cam.z) * k;
+      }
+      const sx = (x: number) => (base.sx(x) - cam.cx) * cam.z + w / 2;
+      const sy = (y: number) => (base.sy(y) - cam.cy) * cam.z + h / 2;
 
       // --- Track (racing line of the fastest lap) ---
       if (meta.racingLine.length > 1) {
@@ -231,7 +264,7 @@ const ReplayCanvas = forwardRef<ReplayHandle, Props>(function ReplayCanvas(
   // Initial paint once the canvas has been measured.
   useEffect(() => {
     const id = requestAnimationFrame(() =>
-      draw(lastRef.current.frame, lastRef.current.focused),
+      draw(lastRef.current.frame, lastRef.current.focused, lastRef.current.onboard),
     );
     return () => cancelAnimationFrame(id);
   }, [draw]);

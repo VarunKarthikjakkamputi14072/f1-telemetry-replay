@@ -113,10 +113,41 @@ export interface Manifest {
   races: RaceSummary[];
 }
 
+export type FlagType = "GREEN" | "YELLOW" | "SC" | "VSC" | "RED";
+
+export interface StatusBand {
+  start: number;
+  end: number;
+  type: FlagType;
+}
+
+export interface WeatherSample {
+  t: number;
+  air: number;
+  track: number;
+  rain: boolean;
+  wind: number;
+}
+
+export interface Moment {
+  t: number;
+  type: string; // start | sc | vsc | red | lead | fl | pit
+  label: string;
+  driver?: string;
+}
+
+export interface Events {
+  raceEnd: number;
+  trackStatus: StatusBand[];
+  weather: WeatherSample[];
+  moments: Moment[];
+}
+
 export interface RaceData {
   meta: Meta;
   frames: Frames;
   laps: Laps;
   traces: Traces;
   analytics: Analytics;
+  events: Events;
 }

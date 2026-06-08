@@ -40,9 +40,13 @@ so a full race exports to **~5 MB** of JSON.
 
 - **Replay** — canvas track render with the racing line, numbered corners and
   start/finish; team-coloured cars with speed-weighted comet trails and DRS
-  markers; a live timing tower with real gap/interval; F1-TV-style telemetry
-  bars for the car you click to focus. Transport controls + keyboard shortcuts
-  (`Space`, `←/→`, `r`).
+  markers; a live timing tower with real gap/interval (and "+1 lap" for lapped
+  cars); F1-TV-style telemetry bars for the car you click to focus, plus a live
+  ahead/behind battle readout. An **onboard** mode zooms and follows the focused
+  car. The scrub bar overlays **race-control bands** (safety car / VSC / yellow /
+  red) and clickable **key-moment markers** (pit stops, lead changes, fastest
+  lap), with a live **flag + weather** readout. Transport controls + keyboard
+  shortcuts (`Space`, `←/→`, `r`).
 - **Strategy** — every driver's race as a tyre-stint timeline, ordered by
   finishing position, with pit stops as the breaks between compounds.
 - **Pace** — the race as a position-change "spaghetti" chart, plus a
