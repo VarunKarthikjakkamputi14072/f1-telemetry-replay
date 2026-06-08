@@ -2,7 +2,6 @@
 
 import type { TowerEntry } from "@/lib/timingTower";
 import type { Meta } from "@/lib/types";
-import { fmtGap } from "@/lib/format";
 
 interface Props {
   meta: Meta;
@@ -43,7 +42,10 @@ export default function Leaderboard({
           const d = byCode[s.code];
           if (!d) return null;
           const isFocus = focused === s.code;
-          const val = gapMode === "leader" ? s.gap : s.interval;
+          const laps = gapMode === "leader" ? s.gapLaps : s.intLaps;
+          const secs = gapMode === "leader" ? s.gap : s.interval;
+          const label =
+            i === 0 ? "Leader" : laps > 0 ? `+${laps}L` : `+${secs.toFixed(3)}`;
           return (
             <button
               key={s.code}
@@ -84,7 +86,7 @@ export default function Leaderboard({
                   i === 0 ? "text-good" : "text-muted"
                 }`}
               >
-                {i === 0 ? "Leader" : fmtGap(val)}
+                {label}
               </span>
             </button>
           );

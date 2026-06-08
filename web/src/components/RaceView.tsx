@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { RaceData } from "@/lib/types";
 import { sampleDriver } from "@/lib/raceEngine";
-import { prepTower, evalTower } from "@/lib/timingTower";
+import { prepTower, computeTower } from "@/lib/timingTower";
 import { fmtClock } from "@/lib/format";
 import ReplayCanvas, { type ReplayHandle } from "./ReplayCanvas";
 import Leaderboard from "./Leaderboard";
@@ -106,12 +106,7 @@ export default function RaceView({ data }: { data: RaceData }) {
   }, [frames]);
 
   const tNow = frames.t0 + uiFrame * frames.step;
-  const pitOf = (code: string) => {
-    const d = frames.drivers[code];
-    const s = d ? sampleDriver(d, uiFrame) : null;
-    return s ? s.spd < 35 : false;
-  };
-  const standings = evalTower(towerPrep, tNow, pitOf);
+  const standings = computeTower(towerPrep, frames, uiFrame);
 
   // Leader's current lap = laps they've completed + 1.
   const leaderCode = standings[0]?.code;

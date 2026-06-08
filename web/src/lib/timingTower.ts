@@ -1,20 +1,25 @@
-import type { Analytics, Laps } from "./types";
+import type { Analytics, Frames, Laps } from "./types";
+import { sampleDriver } from "./raceEngine";
 
-// Official timing tower, driven by FastF1's per-lap Position and the
-// distance-aligned gap-to-leader — not by noisy cumulative track distance,
-// which jumbles the order at a standing start when every car is stacked.
+// Timing tower. Order AND gap come from the same FastF1 official timing, so they
+// can never disagree: the running order is the per-lap Position, and the gap is
+// the distance-aligned gap-to-leader (interpolated over time so it ticks
+// smoothly). Lapped cars are shown as whole laps down ("+1L"), exactly as a
+// broadcast timing screen does, rather than a meaningless seconds figure.
 
 export interface TowerEntry {
   code: string;
   pos: number;
-  gap: number; // seconds behind leader
-  interval: number; // seconds behind car ahead
+  gap: number; // seconds behind leader (valid when gapLaps === 0)
+  gapLaps: number; // whole laps down to the leader
+  interval: number; // seconds behind car ahead (valid when intLaps === 0)
+  intLaps: number; // whole laps down to the car ahead
   pit: boolean;
 }
 
 interface Point {
   t: number; // session time the lap was completed
-  gap: number;
+  gap: number; // official gap to leader at that lap
   pos: number;
 }
 
@@ -22,7 +27,7 @@ export interface TowerPrep {
   byCode: Record<string, Point[]>;
 }
 
-/** Build per-driver (time, gap, position) timelines once; cheap to evaluate later. */
+/** Build each driver's official (time, gap, position) timeline once. */
 export function prepTower(laps: Laps, analytics: Analytics): TowerPrep {
   const byCode: Record<string, Point[]> = {};
   for (const [code, recs] of Object.entries(laps)) {
@@ -45,43 +50,68 @@ export function prepTower(laps: Laps, analytics: Analytics): TowerPrep {
 }
 
 /**
- * Evaluate the tower at session time `tNow`.
- *
- * Position is taken from the last completed lap (stepwise, like a real timing
- * screen); the gap is linearly interpolated between lap crossings so it ticks
- * smoothly. `pitOf` reports whether a car is currently stopped (from telemetry).
+ * Position, interpolated gap, and *fractional* race progress for a driver at
+ * `tNow`. Progress = laps crossed + fraction through the current lap; comparing
+ * two drivers' progress and flooring the difference gives a stable laps-down
+ * count that doesn't flicker to "+1L" just because the leader crossed the line
+ * a few seconds before a same-lap car behind.
  */
-export function evalTower(
-  prep: TowerPrep,
-  tNow: number,
-  pitOf: (code: string) => boolean,
-): TowerEntry[] {
-  const rows: { code: string; pos: number; gap: number }[] = [];
-  for (const [code, pts] of Object.entries(prep.byCode)) {
-    // Before the first crossing, fall back to the first known order (the grid).
-    if (tNow <= pts[0].t) {
-      rows.push({ code, pos: pts[0].pos, gap: pts[0].gap });
-      continue;
-    }
-    // Find the bracketing lap crossings around tNow.
-    let i = 0;
-    while (i < pts.length - 1 && pts[i + 1].t <= tNow) i++;
-    const a = pts[i];
-    const b = pts[i + 1];
-    let gap = a.gap;
-    if (b) {
-      const f = (tNow - a.t) / (b.t - a.t || 1);
-      gap = a.gap + (b.gap - a.gap) * f;
-    }
-    rows.push({ code, pos: a.pos, gap: Math.max(0, gap) });
+function evalAt(pts: Point[], tNow: number) {
+  if (tNow <= pts[0].t) {
+    return { pos: pts[0].pos, gap: pts[0].gap, prog: 0 };
   }
+  let i = 0;
+  while (i < pts.length - 1 && pts[i + 1].t <= tNow) i++;
+  const a = pts[i];
+  const b = pts[i + 1];
+  let gap = a.gap;
+  let frac = 0;
+  if (b) {
+    frac = (tNow - a.t) / (b.t - a.t || 1);
+    gap = a.gap + (b.gap - a.gap) * frac;
+  }
+  return { pos: a.pos, gap, prog: i + 1 + frac };
+}
 
-  rows.sort((p, q) => p.pos - q.pos || p.gap - q.gap);
-  return rows.map((r, idx) => ({
-    code: r.code,
-    pos: idx + 1,
-    gap: idx === 0 ? 0 : r.gap,
-    interval: idx === 0 ? 0 : Math.max(0, r.gap - rows[idx - 1].gap),
-    pit: pitOf(r.code),
-  }));
+/** Full tower at an absolute frame index. */
+export function computeTower(
+  prep: TowerPrep,
+  frames: Frames,
+  absFrame: number,
+): TowerEntry[] {
+  const tNow = frames.t0 + absFrame * frames.step;
+
+  const rows: {
+    code: string;
+    pos: number;
+    gap: number;
+    prog: number;
+    pit: boolean;
+  }[] = [];
+  for (const [code, pts] of Object.entries(prep.byCode)) {
+    const df = frames.drivers[code];
+    if (!df) continue;
+    const s = sampleDriver(df, absFrame);
+    if (!s) continue; // retired / not yet on track
+    const e = evalAt(pts, tNow);
+    rows.push({ code, pos: e.pos, gap: e.gap, prog: e.prog, pit: s.spd < 35 });
+  }
+  rows.sort((a, b) => a.pos - b.pos);
+
+  const leader = rows[0];
+  return rows.map((r, idx) => {
+    if (idx === 0) {
+      return { code: r.code, pos: 1, gap: 0, gapLaps: 0, interval: 0, intLaps: 0, pit: r.pit };
+    }
+    const ahead = rows[idx - 1];
+    return {
+      code: r.code,
+      pos: idx + 1,
+      gap: Math.max(0, r.gap),
+      gapLaps: Math.max(0, Math.floor(leader.prog - r.prog)),
+      interval: Math.max(0, r.gap - ahead.gap),
+      intLaps: Math.max(0, Math.floor(ahead.prog - r.prog)),
+      pit: r.pit,
+    };
+  });
 }
