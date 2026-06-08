@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import type { TowerEntry } from "@/lib/timingTower";
 import type { Meta } from "@/lib/types";
 
@@ -47,10 +48,12 @@ export default function Leaderboard({
           const label =
             i === 0 ? "Leader" : laps > 0 ? `+${laps}L` : `+${secs.toFixed(3)}`;
           return (
-            <button
+            <div
               key={s.code}
+              role="button"
+              tabIndex={0}
               onClick={() => onPick(isFocus ? null : s.code)}
-              className={`flex w-full items-center gap-2 px-2 py-[7px] text-left transition ${
+              className={`group flex w-full cursor-pointer items-center gap-2 px-2 py-[7px] text-left transition ${
                 isFocus
                   ? "bg-panel-2"
                   : i % 2
@@ -71,6 +74,14 @@ export default function Leaderboard({
               <span className="flex-1 truncate text-xs text-muted-2">
                 {d.team}
               </span>
+              <Link
+                href={`/race/${meta.year}/${meta.round}/driver/${s.code}`}
+                onClick={(e) => e.stopPropagation()}
+                title={`${d.code} race report`}
+                className="text-muted-2 opacity-0 transition hover:text-text group-hover:opacity-100"
+              >
+                ↗
+              </Link>
               {fastestLap === s.code && (
                 <span className="rounded bg-purple/20 px-1 text-[9px] font-bold text-purple">
                   FL
@@ -88,7 +99,7 @@ export default function Leaderboard({
               >
                 {label}
               </span>
-            </button>
+            </div>
           );
         })}
       </div>
