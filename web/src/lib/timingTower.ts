@@ -56,9 +56,14 @@ export function prepTower(laps: Laps, analytics: Analytics): TowerPrep {
  * count that doesn't flicker to "+1L" just because the leader crossed the line
  * a few seconds before a same-lap car behind.
  */
-function evalAt(pts: Point[], tNow: number) {
+function evalAt(pts: Point[], tNow: number, raceStart: number) {
+  // Before the first line crossing there is no earlier data point, so grow the
+  // gap from 0 at the start to the lap-1 gap rather than holding it constant
+  // (which froze the whole field for the entire opening lap).
   if (tNow <= pts[0].t) {
-    return { pos: pts[0].pos, gap: pts[0].gap, prog: 0 };
+    const span = pts[0].t - raceStart;
+    const f = span > 0 ? Math.max(0, Math.min(1, (tNow - raceStart) / span)) : 0;
+    return { pos: pts[0].pos, gap: pts[0].gap * f, prog: f };
   }
   let i = 0;
   while (i < pts.length - 1 && pts[i + 1].t <= tNow) i++;
@@ -93,7 +98,7 @@ export function computeTower(
     if (!df) continue;
     const s = sampleDriver(df, absFrame);
     if (!s) continue; // retired / not yet on track
-    const e = evalAt(pts, tNow);
+    const e = evalAt(pts, tNow, frames.t0);
     rows.push({ code, pos: e.pos, gap: e.gap, prog: e.prog, pit: s.spd < 35 });
   }
   rows.sort((a, b) => a.pos - b.pos);
