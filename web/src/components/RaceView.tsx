@@ -27,19 +27,44 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "engineer", label: "AI Engineer" },
 ];
 
+const TAB_IDS = new Set<Tab>(["replay", "strategy", "pace", "compare", "engineer"]);
+
+/** Read a shareable moment (tab / time / driver / camera) from the URL once. */
+function readShareParams(codes: string[], step: number) {
+  if (typeof window === "undefined") return null;
+  const p = new URLSearchParams(window.location.search);
+  const tab = p.get("tab");
+  const t = p.get("t");
+  const d = p.get("d");
+  const frame = t != null && isFinite(Number(t)) ? Number(t) / step : null;
+  return {
+    tab: tab && TAB_IDS.has(tab as Tab) ? (tab as Tab) : null,
+    frame,
+    driver: d && codes.includes(d) ? d : null,
+    onboard: p.get("cam") === "1",
+    hasMoment: t != null,
+  };
+}
+
 export default function RaceView({ data }: { data: RaceData }) {
   const { meta, frames, laps, traces, analytics, events, engineer } = data;
-  const [tab, setTab] = useState<Tab>("replay");
-  const [playing, setPlaying] = useState(true);
+  const init = useMemo(
+    () => readShareParams(meta.drivers.map((d) => d.code), frames.step),
+    [meta.drivers, frames.step],
+  );
+
+  const [tab, setTab] = useState<Tab>(init?.tab ?? "replay");
+  const [playing, setPlaying] = useState(!init?.hasMoment); // open paused at a shared moment
   const [speed, setSpeed] = useState(2);
-  const [uiFrame, setUiFrame] = useState(0);
-  const [focused, setFocused] = useState<string | null>(null);
+  const [uiFrame, setUiFrame] = useState(init?.frame ?? 0);
+  const [focused, setFocused] = useState<string | null>(init?.driver ?? null);
   const [gapMode, setGapMode] = useState<"leader" | "interval">("leader");
-  const [onboard, setOnboard] = useState(false);
+  const [onboard, setOnboard] = useState(init?.onboard ?? false);
+  const [copied, setCopied] = useState(false);
 
   const replayRef = useRef<ReplayHandle>(null);
   const onboardRef = useRef(onboard);
-  const frameRef = useRef(0);
+  const frameRef = useRef(init?.frame ?? 0);
   const playingRef = useRef(playing);
   const speedRef = useRef(speed);
   const focusedRef = useRef(focused);
@@ -174,6 +199,23 @@ export default function RaceView({ data }: { data: RaceData }) {
     replayRef.current?.draw(frame, focusedRef.current, onboardRef.current);
   };
 
+  // Copy a deep link to the current tab / moment / driver / camera.
+  const share = async () => {
+    const p = new URLSearchParams();
+    if (tab !== "replay") p.set("tab", tab);
+    p.set("t", String(Math.round(uiFrame * frames.step)));
+    if (focused) p.set("d", focused);
+    if (onboard) p.set("cam", "1");
+    const url = `${window.location.origin}${window.location.pathname}?${p}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      window.prompt("Copy this link:", url);
+    }
+  };
+
   return (
     <main className="mx-auto w-full max-w-[1180px] px-4 py-6">
       {/* Header */}
@@ -193,20 +235,33 @@ export default function RaceView({ data }: { data: RaceData }) {
             </span>
           </h1>
         </div>
-        <div className="flex gap-1 rounded-lg border border-border p-1">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setTab(t.id)}
-              className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
-                tab === t.id
-                  ? "bg-accent text-white"
-                  : "text-muted hover:text-text"
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={share}
+            title="Copy a link to this exact moment"
+            className={`rounded-lg border px-3 py-2 text-sm font-medium transition ${
+              copied
+                ? "border-good text-good"
+                : "border-border text-muted hover:text-text"
+            }`}
+          >
+            {copied ? "Copied ✓" : "Share"}
+          </button>
+          <div className="flex gap-1 rounded-lg border border-border p-1">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => setTab(t.id)}
+                className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                  tab === t.id
+                    ? "bg-accent text-white"
+                    : "text-muted hover:text-text"
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 

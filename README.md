@@ -49,8 +49,9 @@ so a full race exports to **~5 MB** of JSON.
   shortcuts (`Space`, `←/→`, `r`).
 - **Strategy** — every driver's race as a tyre-stint timeline, ordered by
   finishing position, with pit stops as the breaks between compounds.
-- **Pace** — the race as a position-change "spaghetti" chart, plus a
-  gap-to-leader evolution chart.
+- **Pace** — a **mini-sector dominance** map (the lap split into 20 sectors,
+  the track shaded by who's quickest through each), the race as a
+  position-change "spaghetti" chart, and a gap-to-leader evolution chart.
 - **Compare** — pick two drivers for a distance-aligned delta-time curve and
   overlaid speed/throttle traces from their quickest laps.
 - **AI Engineer** — an independent strategist makes pit calls lap by lap (tyre
@@ -89,11 +90,27 @@ npm run dev        # http://localhost:3000
 
 The landing page lists every race you've exported.
 
+Any moment is shareable: the **Share** button copies a deep link that restores
+the exact tab, time, focused driver and onboard camera (e.g.
+`/race/2021/22?t=4860&d=VER&cam=1`).
+
 ### Desktop replay (original)
 
 ```bash
 cd src && python main.py            # menu-driven season/race picker
 ```
+
+## Deploy
+
+The app is static apart from the per-race JSON it reads from `public/`, so it
+deploys to **Vercel** with no configuration:
+
+```bash
+cd web && npx vercel        # or import the repo at vercel.com/new
+```
+
+The exported race data is committed under `web/public/data/`, so the deployed
+site has content immediately. To add races, run the pipeline and redeploy.
 
 ---
 
