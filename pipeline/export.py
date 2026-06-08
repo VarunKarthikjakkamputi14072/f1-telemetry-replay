@@ -66,7 +66,7 @@ def load_session(year: int, race: str):
     fastf1.Cache.enable_cache(CACHE_DIR)
     print(f"⏳ Loading {year} {race} (Race)...")
     session = fastf1.get_session(year, race, "R")
-    session.load(telemetry=True, laps=True, weather=False)
+    session.load(telemetry=True, laps=True, weather=True)
     print(f"📍 {session.event['EventName']} — round {session.event['RoundNumber']}")
     return session
 
@@ -275,6 +275,112 @@ def _num_for(drivers, code):
     return drivers[code]["num"]
 
 
+# Track-status codes (F1 timing feed) -> the categories the web app renders.
+TRACK_STATUS = {
+    "1": "GREEN", "2": "YELLOW", "4": "SC", "5": "RED", "6": "VSC", "7": "VSC",
+}
+
+
+def build_events(session, drivers):
+    """
+    Race control + weather + key moments, all on the shared session clock.
+
+    - trackStatus: merged [tStart, tEnd, type] bands for SC / VSC / yellow / red.
+    - weather: down-sampled air/track temp, rain flag and wind.
+    - moments: clickable highlights (race start, SC/VSC/red, lead changes, the
+      eventual fastest lap, and pit stops).
+    """
+    race_end = 0.0
+    for d in drivers.values():
+        for r in d["laps"]:
+            if r["t"]:
+                race_end = max(race_end, r["t"])
+
+    # --- Track status bands ---
+    bands = []
+    try:
+        ts = session.track_status
+        rows = [(float(t.total_seconds()), TRACK_STATUS.get(str(s), "GREEN"))
+                for t, s in zip(ts["Time"], ts["Status"])]
+        rows.sort(key=lambda r: r[0])
+        for i, (t, kind) in enumerate(rows):
+            end = rows[i + 1][0] if i + 1 < len(rows) else race_end
+            if end <= t:
+                continue
+            if bands and bands[-1]["type"] == kind and abs(bands[-1]["end"] - t) < 0.1:
+                bands[-1]["end"] = end  # merge consecutive equal statuses
+            else:
+                bands.append({"start": round(t, 1), "end": round(end, 1), "type": kind})
+    except Exception:
+        pass
+    status_bands = [b for b in bands if b["type"] != "GREEN"]
+
+    # --- Weather samples ---
+    weather = []
+    try:
+        wd = session.weather_data
+        for _, w in wd.iterrows():
+            weather.append({
+                "t": round(float(w["Time"].total_seconds()), 1),
+                "air": round(float(w["AirTemp"]), 1),
+                "track": round(float(w["TrackTemp"]), 1),
+                "rain": bool(w["Rainfall"]),
+                "wind": round(float(w["WindSpeed"]), 1),
+            })
+    except Exception:
+        pass
+
+    # --- Key moments ---
+    # Race start aligns with the start of telemetry (the seek bar's left edge).
+    t_start = min((float(d["t"][0]) for d in drivers.values() if len(d["t"])),
+                  default=0.0)
+    moments = []
+    if race_end > 0:
+        moments.append({"t": round(t_start, 1), "type": "start", "label": "Race start"})
+    for b in status_bands:
+        if b["type"] in ("SC", "VSC", "RED"):
+            label = {"SC": "Safety Car", "VSC": "Virtual Safety Car",
+                     "RED": "Red flag"}[b["type"]]
+            moments.append({"t": b["start"], "type": b["type"].lower(), "label": label})
+
+    # Lead changes: when whoever holds P1 at the end of a lap changes.
+    lead_by_lap = {}
+    for code, d in drivers.items():
+        for r in d["laps"]:
+            if r["lap"] is not None and r["pos"] == 1 and r["t"] is not None:
+                lead_by_lap[r["lap"]] = (code, r["t"])
+    prev_leader = None
+    for lap in sorted(lead_by_lap):
+        code, t = lead_by_lap[lap]
+        if prev_leader is not None and code != prev_leader:
+            moments.append({"t": round(t, 1), "type": "lead",
+                            "label": f"{code} leads", "driver": code})
+        prev_leader = code
+
+    # Eventual fastest lap of the race.
+    fl = None
+    for code, d in drivers.items():
+        for r in d["laps"]:
+            if r["lapTime"] and r["lapTime"] > 0 and (fl is None or r["lapTime"] < fl[2]):
+                fl = (code, r["t"], r["lapTime"])
+    if fl and fl[1]:
+        m, s = divmod(fl[2], 60)
+        moments.append({"t": round(fl[1], 1), "type": "fl",
+                        "label": f"Fastest lap {fl[0]} {int(m)}:{s:06.3f}",
+                        "driver": fl[0]})
+
+    # Pit stops.
+    for code, d in drivers.items():
+        for r in d["laps"]:
+            if r["pitIn"] and r["t"] is not None:
+                moments.append({"t": round(r["t"], 1), "type": "pit",
+                                "label": f"{code} pits", "driver": code})
+
+    moments.sort(key=lambda m: m["t"])
+    return {"raceEnd": round(race_end, 1), "trackStatus": status_bands,
+            "weather": weather, "moments": moments}
+
+
 def build_analytics(drivers):
     """Gap-to-leader per lap, position-by-lap, sector dominance, undercut flags."""
     laps_by_driver = {
@@ -390,6 +496,8 @@ def main():
                                    build_traces(session, drivers)),
         "analytics.json": write_json(os.path.join(out_dir, "analytics.json"),
                                       build_analytics(drivers)),
+        "events.json": write_json(os.path.join(out_dir, "events.json"),
+                                   build_events(session, drivers)),
     }
     update_manifest(meta)
 
