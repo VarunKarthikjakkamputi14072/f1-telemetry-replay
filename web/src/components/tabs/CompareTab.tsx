@@ -84,31 +84,6 @@ export default function CompareTab({ meta, traces }: Props) {
     return { rows, lapA: tA.lapTime, lapB: tB.lapTime };
   }, [a, b, traces]);
 
-  const Picker = ({
-    value,
-    onChange,
-    color,
-  }: {
-    value: string;
-    onChange: (v: string) => void;
-    color: string;
-  }) => (
-    <div className="flex items-center gap-2">
-      <span className="h-4 w-1.5 rounded" style={{ background: color }} />
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="rounded-md border border-border bg-panel-2 px-2 py-1 text-sm text-text outline-none"
-      >
-        {available.map((d) => (
-          <option key={d.code} value={d.code}>
-            {d.code} — {d.name}
-          </option>
-        ))}
-      </select>
-    </div>
-  );
-
   const tooltip = {
     contentStyle: {
       background: "#101218",
@@ -122,9 +97,9 @@ export default function CompareTab({ meta, traces }: Props) {
     <div className="space-y-4">
       <div className="panel flex flex-wrap items-center justify-between gap-4 p-4">
         <div className="flex flex-wrap items-center gap-4">
-          <Picker value={a} onChange={setA} color={colorA} />
+          <Picker value={a} onChange={setA} color={colorA} options={available} />
           <span className="text-muted-2">vs</span>
-          <Picker value={b} onChange={setB} color={colorB} />
+          <Picker value={b} onChange={setB} color={colorB} options={available} />
         </div>
         <div className="flex gap-5 text-sm">
           <span className="tnum" style={{ color: colorA }}>
@@ -224,6 +199,37 @@ export default function CompareTab({ meta, traces }: Props) {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// Module-scope so it keeps a stable identity across renders — defining it inside
+// CompareTab remounted the <select> on every change and made it unselectable.
+function Picker({
+  value,
+  onChange,
+  color,
+  options,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  color: string;
+  options: { code: string; name: string }[];
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="h-4 w-1.5 rounded" style={{ background: color }} />
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="rounded-md border border-border bg-panel-2 px-2 py-1 text-sm text-text outline-none"
+      >
+        {options.map((d) => (
+          <option key={d.code} value={d.code}>
+            {d.code} — {d.name}
+          </option>
+        ))}
+      </select>
     </div>
   );
 }

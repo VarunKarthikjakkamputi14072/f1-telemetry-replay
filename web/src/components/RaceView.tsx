@@ -49,15 +49,28 @@ export default function RaceView({ data }: { data: RaceData }) {
   // Per-driver official timing timelines (built once).
   const towerPrep = useMemo(() => prepTower(laps, analytics), [laps, analytics]);
 
-  const fastestLap = useMemo(() => {
-    let best: { code: string; t: number } | null = null;
+  // When the fastest lap of the race changes hands, in order of session time.
+  // Lets the FL crown appear only once that lap has actually been set, rather
+  // than spoiling the eventual holder from the start.
+  const flTimeline = useMemo(() => {
+    const all: { t: number; code: string; lapTime: number }[] = [];
     for (const [code, recs] of Object.entries(laps)) {
       for (const r of recs) {
-        if (r.lapTime && r.lapTime > 0 && (!best || r.lapTime < best.t))
-          best = { code, t: r.lapTime };
+        if (r.t != null && r.lapTime && r.lapTime > 0) {
+          all.push({ t: r.t, code, lapTime: r.lapTime });
+        }
       }
     }
-    return best?.code ?? null;
+    all.sort((p, q) => p.t - q.t);
+    const timeline: { t: number; code: string }[] = [];
+    let bestTime = Infinity;
+    for (const l of all) {
+      if (l.lapTime < bestTime) {
+        bestTime = l.lapTime;
+        timeline.push({ t: l.t, code: l.code });
+      }
+    }
+    return timeline;
   }, [laps]);
 
   // Single animation loop: advance the clock, draw the canvas, throttle UI.
@@ -115,6 +128,13 @@ export default function RaceView({ data }: { data: RaceData }) {
     : 0;
   const curLap = Math.min(meta.totalLaps, completed + 1);
   const elapsed = uiFrame * frames.step;
+
+  // Fastest-lap holder as of the current replay time (last change at or before now).
+  let fastestLap: string | null = null;
+  for (const fl of flTimeline) {
+    if (fl.t <= tNow) fastestLap = fl.code;
+    else break;
+  }
 
   const focusedSample =
     focused && frames.drivers[focused]
