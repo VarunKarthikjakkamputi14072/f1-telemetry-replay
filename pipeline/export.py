@@ -26,6 +26,7 @@ from .compute import (
     lap_gap_to_leader,
     resample,
 )
+from .engineer import build_engineer
 
 warnings.filterwarnings("ignore")
 
@@ -486,6 +487,8 @@ def main():
     out_dir = os.path.join(WEB_DATA, str(args.year), str(rnd))
 
     meta = build_meta(session, drivers, bounds, args.year)
+    analytics = build_analytics(drivers)
+    events = build_events(session, drivers)
     sizes = {
         "meta.json": write_json(os.path.join(out_dir, "meta.json"), meta),
         "frames.json": write_json(os.path.join(out_dir, "frames.json"),
@@ -495,9 +498,11 @@ def main():
         "traces.json": write_json(os.path.join(out_dir, "traces.json"),
                                    build_traces(session, drivers)),
         "analytics.json": write_json(os.path.join(out_dir, "analytics.json"),
-                                      build_analytics(drivers)),
-        "events.json": write_json(os.path.join(out_dir, "events.json"),
-                                   build_events(session, drivers)),
+                                      analytics),
+        "events.json": write_json(os.path.join(out_dir, "events.json"), events),
+        "engineer.json": write_json(os.path.join(out_dir, "engineer.json"),
+                                    build_engineer(drivers, meta["totalLaps"],
+                                                   analytics, meta["drivers"], events)),
     }
     update_manifest(meta)
 
