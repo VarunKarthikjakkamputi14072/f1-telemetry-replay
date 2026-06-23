@@ -16,8 +16,9 @@ import StrategyTab from "./tabs/StrategyTab";
 import PaceTab from "./tabs/PaceTab";
 import CompareTab from "./tabs/CompareTab";
 import EngineerTab from "./tabs/EngineerTab";
+import StrategistTab from "./tabs/StrategistTab";
 
-type Tab = "replay" | "strategy" | "pace" | "compare" | "engineer";
+type Tab = "replay" | "strategy" | "pace" | "compare" | "engineer" | "ask";
 const SPEEDS = [0.5, 1, 2, 4, 8];
 const TABS: { id: Tab; label: string }[] = [
   { id: "replay", label: "Replay" },
@@ -25,9 +26,10 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "pace", label: "Pace" },
   { id: "compare", label: "Compare" },
   { id: "engineer", label: "AI Engineer" },
+  { id: "ask", label: "Ask" },
 ];
 
-const TAB_IDS = new Set<Tab>(["replay", "strategy", "pace", "compare", "engineer"]);
+const TAB_IDS = new Set<Tab>(["replay", "strategy", "pace", "compare", "engineer", "ask"]);
 
 /** Read a shareable moment (tab / time / driver / camera) from the URL once. */
 function readShareParams(codes: string[], step: number) {
@@ -420,6 +422,7 @@ export default function RaceView({ data }: { data: RaceData }) {
       {tab === "engineer" && (
         <EngineerTab engineer={engineer} totalLaps={meta.totalLaps} />
       )}
+      {tab === "ask" && <StrategistTab meta={meta} />}
     </main>
   );
 }

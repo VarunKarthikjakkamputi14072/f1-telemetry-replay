@@ -60,6 +60,12 @@ so a full race exports to **~5 MB** of JSON.
   deterministic and reproducible; set `GROQ_API_KEY` to have **Llama** (Groq's
   free tier) write the verdicts. On 2021 Abu Dhabi the engine independently
   reproduces Verstappen's three stops, including the lap-54 switch to softs.
+- **Ask the Strategist** — a retrieval-augmented chat grounded in the race data.
+  Each race is turned into fact-cards; a BM25-lite hybrid retriever (no vector
+  DB) finds the relevant ones and an LLM answers **with citations** back to laps
+  and drivers — falling back to a deterministic extractive answer with no key. A
+  RAGAS-style eval (`npm run eval:strategist`) scores context-recall, answer
+  accuracy and faithfulness (currently 100% / 100% / 1.00 across the seed races).
 
 ---
 
