@@ -39,7 +39,15 @@ export async function getRaceData(
   // "default" lets the browser/CDN revalidate via ETag — instant on repeat
   // visits in production, but never serves a stale file after a re-export.
   const hard: RequestCache = "default";
-  const [meta, frames, laps, traces, analytics, events, engineer] =
+  const optional = async <T>(url: string): Promise<T | null> => {
+    try {
+      const res = await fetch(url, { cache: hard });
+      return res.ok ? ((await res.json()) as T) : null;
+    } catch {
+      return null;
+    }
+  };
+  const [meta, frames, laps, traces, analytics, events, engineer, simulation] =
     await Promise.all([
       getJSON<Meta>(`${base}/meta.json`, hard),
       getJSON<Frames>(`${base}/frames.json`, hard),
@@ -48,6 +56,7 @@ export async function getRaceData(
       getJSON<Analytics>(`${base}/analytics.json`, hard),
       getJSON<Events>(`${base}/events.json`, hard),
       getJSON<Engineer>(`${base}/engineer.json`, hard),
+      optional<import("./types").Simulation>(`${base}/simulation.json`),
     ]);
-  return { meta, frames, laps, traces, analytics, events, engineer };
+  return { meta, frames, laps, traces, analytics, events, engineer, simulation };
 }

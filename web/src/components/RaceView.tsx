@@ -17,19 +17,44 @@ import PaceTab from "./tabs/PaceTab";
 import CompareTab from "./tabs/CompareTab";
 import EngineerTab from "./tabs/EngineerTab";
 import StrategistTab from "./tabs/StrategistTab";
+import SimulatorTab from "./tabs/SimulatorTab";
+import OverviewTab, { type SectionId } from "./tabs/OverviewTab";
 
-type Tab = "replay" | "strategy" | "pace" | "compare" | "engineer" | "ask";
+type Tab =
+  | "overview"
+  | "replay"
+  | "strategy"
+  | "pace"
+  | "compare"
+  | "engineer"
+  | "simulator"
+  | "ask";
 const SPEEDS = [0.5, 1, 2, 4, 8];
-const TABS: { id: Tab; label: string }[] = [
-  { id: "replay", label: "Replay" },
-  { id: "strategy", label: "Strategy" },
-  { id: "pace", label: "Pace" },
-  { id: "compare", label: "Compare" },
-  { id: "engineer", label: "AI Engineer" },
-  { id: "ask", label: "Ask" },
+// Grouped nav so the options read as sections, not a flat maze of pills.
+const NAV: { group: string | null; items: { id: Tab; label: string }[] }[] = [
+  { group: null, items: [{ id: "overview", label: "Overview" }] },
+  { group: "Watch", items: [{ id: "replay", label: "Replay" }] },
+  {
+    group: "Analyse",
+    items: [
+      { id: "strategy", label: "Strategy" },
+      { id: "pace", label: "Pace" },
+      { id: "compare", label: "Compare" },
+    ],
+  },
+  {
+    group: "AI",
+    items: [
+      { id: "engineer", label: "AI Engineer" },
+      { id: "simulator", label: "Simulator" },
+      { id: "ask", label: "Ask" },
+    ],
+  },
 ];
 
-const TAB_IDS = new Set<Tab>(["replay", "strategy", "pace", "compare", "engineer", "ask"]);
+const TAB_IDS = new Set<Tab>([
+  "overview", "replay", "strategy", "pace", "compare", "engineer", "simulator", "ask",
+]);
 
 /** Read a shareable moment (tab / time / driver / camera) from the URL once. */
 function readShareParams(codes: string[], step: number) {
@@ -49,13 +74,14 @@ function readShareParams(codes: string[], step: number) {
 }
 
 export default function RaceView({ data }: { data: RaceData }) {
-  const { meta, frames, laps, traces, analytics, events, engineer } = data;
+  const { meta, frames, laps, traces, analytics, events, engineer, simulation } =
+    data;
   const init = useMemo(
     () => readShareParams(meta.drivers.map((d) => d.code), frames.step),
     [meta.drivers, frames.step],
   );
 
-  const [tab, setTab] = useState<Tab>(init?.tab ?? "replay");
+  const [tab, setTab] = useState<Tab>(init?.tab ?? "overview");
   const [playing, setPlaying] = useState(!init?.hasMoment); // open paused at a shared moment
   const [speed, setSpeed] = useState(2);
   const [uiFrame, setUiFrame] = useState(init?.frame ?? 0);
@@ -249,23 +275,33 @@ export default function RaceView({ data }: { data: RaceData }) {
           >
             {copied ? "Copied ✓" : "Share"}
           </button>
-          <div className="flex gap-1 rounded-lg border border-border p-1">
-            {TABS.map((t) => (
-              <button
-                key={t.id}
-                onClick={() => setTab(t.id)}
-                className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
-                  tab === t.id
-                    ? "bg-accent text-white"
-                    : "text-muted hover:text-text"
-                }`}
-              >
-                {t.label}
-              </button>
+          <div className="flex items-center gap-1 rounded-lg border border-border p-1">
+            {NAV.map((grp, gi) => (
+              <div key={gi} className="flex items-center gap-1">
+                {gi > 0 && <span className="mx-1 h-4 w-px bg-border" />}
+                {grp.items.map((t) => (
+                  <button
+                    key={t.id}
+                    onClick={() => setTab(t.id)}
+                    title={grp.group ?? undefined}
+                    className={`rounded-md px-2.5 py-1.5 text-sm font-medium transition ${
+                      tab === t.id
+                        ? "bg-accent text-white"
+                        : "text-muted hover:text-text"
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
             ))}
           </div>
         </div>
       </div>
+
+      {tab === "overview" && (
+        <OverviewTab data={data} onNavigate={(id: SectionId) => setTab(id)} />
+      )}
 
       {tab === "replay" && (
         <div className="grid gap-4 lg:grid-cols-[1fr_330px]">
@@ -422,6 +458,18 @@ export default function RaceView({ data }: { data: RaceData }) {
       {tab === "engineer" && (
         <EngineerTab engineer={engineer} totalLaps={meta.totalLaps} />
       )}
+      {tab === "simulator" &&
+        (simulation ? (
+          <SimulatorTab simulation={simulation} totalLaps={meta.totalLaps} />
+        ) : (
+          <div className="panel p-6 text-sm text-muted-2">
+            No simulation for this race yet — run{" "}
+            <code className="rounded bg-panel-2 px-1.5 py-0.5 text-text">
+              python -m pipeline.simulate
+            </code>
+            .
+          </div>
+        ))}
       {tab === "ask" && <StrategistTab meta={meta} />}
     </main>
   );

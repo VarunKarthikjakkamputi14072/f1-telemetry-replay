@@ -20,7 +20,7 @@ import json
 import os
 
 from .export import REQUIRED_FILES, WEB_DATA, refresh_manifest, run_export
-from . import train_model
+from . import simulate, train_model
 
 
 def known_races():
@@ -84,6 +84,9 @@ def main():
 
     print("\n🧠 retraining pace model on the full set...")
     train_model.main()
+
+    print("\n🎲 re-running strategy simulations...")
+    simulate.main()
 
     print("\n📇 refreshing manifest...")
     races, model = refresh_manifest()

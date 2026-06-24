@@ -229,6 +229,25 @@ export interface PaceModel {
   drift: ModelDrift[];
 }
 
+export interface SimStrategy {
+  stints: Stint[];
+  stops: number;
+  meanTime: number;
+  deltaToOptimal: number;
+  code?: string;
+}
+
+export interface Simulation {
+  totalLaps: number;
+  nSims: number;
+  baseLap: number;
+  degRates: Record<string, number>;
+  optimal: SimStrategy;
+  alternatives: SimStrategy[];
+  distribution: { t: number; count: number }[];
+  winner: SimStrategy | null;
+}
+
 export interface RaceData {
   meta: Meta;
   frames: Frames;
@@ -237,4 +256,5 @@ export interface RaceData {
   analytics: Analytics;
   events: Events;
   engineer: Engineer;
+  simulation: Simulation | null;
 }
