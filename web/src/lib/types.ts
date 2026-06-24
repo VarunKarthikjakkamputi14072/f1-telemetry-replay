@@ -194,6 +194,30 @@ export interface Engineer {
   drivers: EngineerDriver[];
 }
 
+export interface ModelDrift {
+  race: string;
+  n: number;
+  trackTempMean: number;
+  paceSpread: number;
+  drift: number;
+  drifted: boolean;
+}
+
+export interface PaceModel {
+  generated: string;
+  model: string;
+  target: string;
+  features: string[];
+  fuelEffect: number;
+  nSamples: number;
+  races: string[];
+  metrics: { mae: number; r2: number };
+  importances: Record<string, number>;
+  curves: Record<string, { age: number; pace: number }[]>;
+  slopes: Record<string, number>;
+  drift: ModelDrift[];
+}
+
 export interface RaceData {
   meta: Meta;
   frames: Frames;

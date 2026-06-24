@@ -16,6 +16,15 @@ async function getJSON<T>(url: string, cache: RequestCache): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export async function getModel(): Promise<import("./types").PaceModel | null> {
+  try {
+    const res = await fetch("/data/model.json", { cache: "default" });
+    return res.ok ? await res.json() : null;
+  } catch {
+    return null;
+  }
+}
+
 export function getManifest(): Promise<Manifest> {
   // The manifest grows as races are exported, so always fetch it fresh; the
   // per-race files below are immutable per path and safe to hard-cache.

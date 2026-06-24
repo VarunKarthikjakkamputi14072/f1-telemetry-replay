@@ -1,8 +1,16 @@
 "use client";
 
-import { useState } from "react";
-import type { Engineer, EngineerDriver, PitStop, Stint } from "@/lib/types";
+import { useEffect, useState } from "react";
+import type {
+  Engineer,
+  EngineerDriver,
+  PaceModel,
+  PitStop,
+  Stint,
+} from "@/lib/types";
 import { COMPOUND_COLOR, COMPOUND_LABEL } from "@/lib/format";
+import { getModel } from "@/lib/data";
+import ModelPanel from "../ModelPanel";
 
 function aiStints(
   startCompound: string,
@@ -120,11 +128,17 @@ export default function EngineerTab({
   totalLaps: number;
 }) {
   const [showAll, setShowAll] = useState(false);
+  const [model, setModel] = useState<PaceModel | null>(null);
   const drivers = showAll ? engineer.drivers : engineer.drivers.slice(0, 4);
   const isLlm = engineer.source === "llama";
 
+  useEffect(() => {
+    getModel().then(setModel);
+  }, []);
+
   return (
     <div className="space-y-4">
+      {model && <ModelPanel model={model} />}
       <div className="panel p-5">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-lg font-bold">AI Race Engineer</h2>

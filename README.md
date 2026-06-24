@@ -60,6 +60,12 @@ so a full race exports to **~5 MB** of JSON.
   deterministic and reproducible; set `GROQ_API_KEY` to have **Llama** (Groq's
   free tier) write the verdicts. On 2021 Abu Dhabi the engine independently
   reproduces Verstappen's three stops, including the lap-54 switch to softs.
+- **Tyre & pace model** — a gradient-boosted regressor (scikit-learn) trained on
+  every exported race's green-flag laps predicts lap-time pace from tyre age,
+  fuel load and track temp. The AI Engineer tab shows a model card (MAE / R²),
+  the learned tyre-age curves, feature importance (track temp and fuel dominate;
+  tyre age is secondary), and an Evidently-style **data-drift** check across
+  races. Train with `python -m pipeline.train_model`.
 - **Ask the Strategist** — a retrieval-augmented chat grounded in the race data.
   Each race is turned into fact-cards; a BM25-lite hybrid retriever (no vector
   DB) finds the relevant ones and an LLM answers **with citations** back to laps
