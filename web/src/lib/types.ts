@@ -114,10 +114,21 @@ export interface RaceSummary {
   country: string;
   totalLaps: number;
   drivers: number;
+  complete?: boolean;
+}
+
+export interface ManifestModel {
+  r2: number;
+  mae: number;
+  nSamples: number;
+  trainedRaces: number;
+  stale: boolean;
 }
 
 export interface Manifest {
+  dataVersion?: string;
   races: RaceSummary[];
+  model?: ManifestModel | null;
 }
 
 export type FlagType = "GREEN" | "YELLOW" | "SC" | "VSC" | "RED";

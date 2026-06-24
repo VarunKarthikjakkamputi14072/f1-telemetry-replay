@@ -10,10 +10,12 @@ once; the front-end just reads the JSON. Output lands in web/public/data/<year>/
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import sys
 import warnings
+from datetime import datetime, timezone
 
 import fastf1
 import numpy as np
@@ -484,39 +486,62 @@ def write_json(path, obj):
     return os.path.getsize(path)
 
 
-def update_manifest(meta):
+# Every per-race directory must contain exactly these (consistency check).
+REQUIRED_FILES = [
+    "meta.json", "frames.json", "laps.json", "traces.json",
+    "analytics.json", "events.json", "engineer.json",
+]
+
+
+def refresh_manifest():
+    """
+    Rewrite the manifest from whatever races are on disk, stamping a data version
+    and a model summary so the front-end can show what it's serving and whether
+    the model is in sync with the current race set.
+    """
     os.makedirs(WEB_DATA, exist_ok=True)
-    path = os.path.join(WEB_DATA, "manifest.json")
     races = []
-    if os.path.exists(path):
-        with open(path) as f:
-            races = json.load(f).get("races", [])
-    entry = {
-        "id": f"{meta['year']}-{meta['round']}",
-        "year": meta["year"], "round": meta["round"],
-        "race": meta["race"], "circuit": meta["circuit"],
-        "country": meta["country"], "totalLaps": meta["totalLaps"],
-        "drivers": len(meta["drivers"]),
-    }
-    races = [r for r in races if r["id"] != entry["id"]] + [entry]
+    for meta_path in glob.glob(os.path.join(WEB_DATA, "*", "*", "meta.json")):
+        d = os.path.dirname(meta_path)
+        meta = json.load(open(meta_path))
+        complete = all(os.path.exists(os.path.join(d, f)) for f in REQUIRED_FILES)
+        races.append({
+            "id": f"{meta['year']}-{meta['round']}",
+            "year": meta["year"], "round": meta["round"],
+            "race": meta["race"], "circuit": meta["circuit"],
+            "country": meta["country"], "totalLaps": meta["totalLaps"],
+            "drivers": len(meta["drivers"]), "complete": complete,
+        })
     races.sort(key=lambda r: (r["year"], r["round"]))
-    write_json(path, {"races": races})
+
+    model_summary = None
+    model_path = os.path.join(WEB_DATA, "model.json")
+    if os.path.exists(model_path):
+        m = json.load(open(model_path))
+        trained = set(m.get("races", []))
+        current = {f"{r['year']} {r['race']}" for r in races}
+        model_summary = {
+            "r2": m["metrics"]["r2"], "mae": m["metrics"]["mae"],
+            "nSamples": m["nSamples"], "trainedRaces": len(trained),
+            "stale": trained != current,  # model not retrained since races changed
+        }
+
+    write_json(os.path.join(WEB_DATA, "manifest.json"), {
+        "dataVersion": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
+        "races": races,
+        "model": model_summary,
+    })
+    return races, model_summary
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--year", type=int, required=True)
-    ap.add_argument("--race", type=str, required=True)
-    ap.add_argument("--step", type=float, default=0.5, help="frame grid step (s)")
-    args = ap.parse_args()
-
-    session = load_session(args.year, args.race)
+def run_export(year: int, race: str, step: float = 0.5):
+    """Export one race's full data bundle. Returns its meta dict."""
+    session = load_session(year, race)
     drivers, bounds = build_driver_telemetry(session)
-
     rnd = int(session.event["RoundNumber"])
-    out_dir = os.path.join(WEB_DATA, str(args.year), str(rnd))
+    out_dir = os.path.join(WEB_DATA, str(year), str(rnd))
 
-    meta = build_meta(session, drivers, bounds, args.year)
+    meta = build_meta(session, drivers, bounds, year)
     traces = build_traces(session, drivers)
     meta["miniSectors"] = build_mini_sectors(
         traces, {d["code"]: d["color"] for d in meta["drivers"]})
@@ -525,23 +550,31 @@ def main():
     sizes = {
         "meta.json": write_json(os.path.join(out_dir, "meta.json"), meta),
         "frames.json": write_json(os.path.join(out_dir, "frames.json"),
-                                   build_frames(drivers, args.step)),
+                                   build_frames(drivers, step)),
         "laps.json": write_json(os.path.join(out_dir, "laps.json"),
                                  {c: d["laps"] for c, d in drivers.items()}),
         "traces.json": write_json(os.path.join(out_dir, "traces.json"), traces),
-        "analytics.json": write_json(os.path.join(out_dir, "analytics.json"),
-                                      analytics),
+        "analytics.json": write_json(os.path.join(out_dir, "analytics.json"), analytics),
         "events.json": write_json(os.path.join(out_dir, "events.json"), events),
         "engineer.json": write_json(os.path.join(out_dir, "engineer.json"),
                                     build_engineer(drivers, meta["totalLaps"],
                                                    analytics, meta["drivers"], events)),
     }
-    update_manifest(meta)
-
     print(f"\n📦 {out_dir}")
     for name, size in sizes.items():
         print(f"   {name:<16} {size / 1024:8.1f} KB")
     print(f"   TOTAL            {sum(sizes.values()) / 1024 / 1024:7.2f} MB")
+    return meta
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--year", type=int, required=True)
+    ap.add_argument("--race", type=str, required=True)
+    ap.add_argument("--step", type=float, default=0.5, help="frame grid step (s)")
+    args = ap.parse_args()
+    run_export(args.year, args.race, args.step)
+    refresh_manifest()
 
 
 if __name__ == "__main__":

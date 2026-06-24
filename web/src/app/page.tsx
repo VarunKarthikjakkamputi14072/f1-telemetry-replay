@@ -3,16 +3,17 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { getManifest } from "@/lib/data";
-import type { RaceSummary } from "@/lib/types";
+import type { Manifest, RaceSummary } from "@/lib/types";
 
 export default function Home() {
-  const [races, setRaces] = useState<RaceSummary[] | null>(null);
+  const [manifest, setManifest] = useState<Manifest | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const races = manifest?.races ?? null;
 
   useEffect(() => {
     getManifest()
-      .then((m) => setRaces(m.races.slice()))
+      .then(setManifest)
       .catch((e) => setError(String(e)));
   }, []);
 
@@ -155,9 +156,25 @@ export default function Home() {
         </p>
       )}
 
-      <footer className="mt-20 border-t border-border-soft pt-6 text-xs text-muted-2">
-        Telemetry via FastF1. Not affiliated with Formula 1. Built as a
-        portfolio project.
+      <footer className="mt-20 flex flex-wrap items-center justify-between gap-3 border-t border-border-soft pt-6 text-xs text-muted-2">
+        <span>
+          Telemetry via FastF1. Not affiliated with Formula 1. Built as a
+          portfolio project.
+        </span>
+        {manifest && (
+          <span className="tnum flex items-center gap-3">
+            {manifest.dataVersion && (
+              <span>data {manifest.dataVersion.replace("T", " ")}</span>
+            )}
+            <span>{manifest.races.length} races</span>
+            {manifest.model && (
+              <span className={manifest.model.stale ? "text-accent-2" : "text-good"}>
+                model R² {manifest.model.r2}
+                {manifest.model.stale ? " · stale ⚠" : " · in sync"}
+              </span>
+            )}
+          </span>
+        )}
       </footer>
     </main>
   );
