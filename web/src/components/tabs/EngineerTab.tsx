@@ -130,7 +130,7 @@ export default function EngineerTab({
   const [showAll, setShowAll] = useState(false);
   const [model, setModel] = useState<PaceModel | null>(null);
   const drivers = showAll ? engineer.drivers : engineer.drivers.slice(0, 4);
-  const isLlm = engineer.source === "llama";
+  const isLlm = engineer.source !== "heuristic";
 
   useEffect(() => {
     getModel().then(setModel);
@@ -149,7 +149,7 @@ export default function EngineerTab({
                 : "bg-panel-2 text-muted"
             }`}
           >
-            {isLlm ? `Llama · ${engineer.model}` : "Deterministic strategist"}
+            {isLlm ? `LLM · ${engineer.model}` : "Deterministic strategist"}
           </span>
         </div>
         <p className="mt-2 max-w-3xl text-sm text-muted-2">

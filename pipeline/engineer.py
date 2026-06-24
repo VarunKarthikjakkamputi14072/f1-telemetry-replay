@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import json
 import os
-import urllib.request
+
+from . import llm
 
 # Nominal laps before each compound hits the performance cliff (rough, generic).
 TYRE_LIFE = {"SOFT": 20, "MEDIUM": 30, "HARD": 44, "INTER": 25, "WET": 22}
@@ -23,14 +24,40 @@ PIT_LOSS = 22.0  # seconds lost in a typical stop (pit lane + stationary)
 MIN_LAPS_TO_PIT = 6  # don't bother stopping this close to the flag
 N_FEATURED = 8  # how many drivers (by finishing position) to analyse
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-def _next_compound(laps_left: int) -> str:
+
+def _next_compound(laps_left: int, life: dict) -> str:
     """Quickest compound expected to reach the flag from here."""
-    if laps_left <= TYRE_LIFE["SOFT"]:
+    if laps_left <= life["SOFT"]:
         return "SOFT"
-    if laps_left <= TYRE_LIFE["MEDIUM"]:
+    if laps_left <= life["MEDIUM"]:
         return "MEDIUM"
     return "HARD"
+
+
+def _tyre_life(events) -> tuple[dict, str, float]:
+    """
+    Per-race tyre life, closing the loop with the pace model: it found that track
+    temperature is the dominant driver of pace/degradation, so we scale the
+    nominal life by how hot this race ran versus the model's training mean. Falls
+    back to the nominal constants if the model card isn't present.
+    """
+    weather = events.get("weather", []) if events else []
+    if not weather:
+        return dict(TYRE_LIFE), "nominal", 1.0
+    race_temp = sum(w["track"] for w in weather) / len(weather)
+    try:
+        card = json.load(open(os.path.join(ROOT, "web", "public", "data", "model.json")))
+        mean_temp = card.get("trackTempMean")
+    except Exception:
+        mean_temp = None
+    if not mean_temp:
+        return dict(TYRE_LIFE), "nominal", 1.0
+    # Hotter than the training mean -> tyres die sooner -> shorter life.
+    factor = max(0.8, min(1.2, 1.0 - 0.6 * (race_temp - mean_temp) / mean_temp))
+    life = {c: max(6, round(v * factor)) for c, v in TYRE_LIFE.items()}
+    return life, "model-temp", round(factor, 3)
 
 
 def _per_lap_state(code, drivers, analytics, total_laps):
@@ -70,7 +97,7 @@ def _per_lap_state(code, drivers, analytics, total_laps):
     return state
 
 
-def _strategise(code, state, stints, total_laps, sc_laps):
+def _strategise(code, state, stints, total_laps, sc_laps, life_map):
     """
     Online strategist. Walks the race lap by lap on the *starting* compound and
     decides when to box, choosing the next tyre from laps remaining. Models worn
@@ -86,7 +113,7 @@ def _strategise(code, state, stints, total_laps, sc_laps):
     for lap in range(1, total_laps + 1):
         age = lap - stint_start + 1
         laps_left = total_laps - lap
-        life = TYRE_LIFE.get(compound, 28)
+        life = life_map.get(compound, 28)
         st = state.get(lap, {})
         gap_ahead = st.get("gapAhead")
 
@@ -100,7 +127,7 @@ def _strategise(code, state, stints, total_laps, sc_laps):
         sc_stop = lap in sc_laps and age >= max(6, life * 0.35) and laps_left >= 3
 
         if worn or undercut or sc_stop:
-            nxt = _next_compound(laps_left)
+            nxt = _next_compound(laps_left, life_map)
             if sc_stop and not worn:
                 reason = f"Box under safety car — cheap stop off {age}-lap {compound}"
                 conf = 0.9
@@ -176,33 +203,14 @@ def _templated_verdict(code, actual, ai, grade, finish_pos):
 
 
 def _llm_verdict(payload):
-    """Ask Groq's Llama for a one-paragraph verdict. Returns None on any failure."""
-    key = os.environ.get("GROQ_API_KEY")
-    if not key:
-        return None
+    """Verdict via the Groq->Gemini->Cohere waterfall. Returns (text, provider)."""
     prompt = (
         "You are a Formula 1 race strategist. Compare the engineer's recommended "
         "pit strategy to what the driver actually did, in 2-3 sentences. Be specific "
         "and judgemental about undercuts, tyre life and stop count. Data:\n"
         + json.dumps(payload)
     )
-    body = json.dumps({
-        "model": os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.4, "max_tokens": 160,
-    }).encode()
-    req = urllib.request.Request(
-        "https://api.groq.com/openai/v1/chat/completions",
-        data=body,
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            data = json.load(r)
-        return data["choices"][0]["message"]["content"].strip()
-    except Exception as e:  # noqa: BLE001
-        print(f"   ⚠️ LLM verdict skipped: {e}")
-        return None
+    return llm.complete(prompt, max_tokens=160, temperature=0.4)
 
 
 def _safety_car_laps(drivers, events):
@@ -245,13 +253,15 @@ def build_engineer(drivers, total_laps, analytics, driver_meta, events):
         key=final_pos,
     )[:N_FEATURED]
 
-    use_llm = bool(os.environ.get("GROQ_API_KEY"))
-    model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+    # Close the loop: tyre life informed by the pace model's temperature finding.
+    life_map, life_source, life_factor = _tyre_life(events)
+
+    provider = None
     out = []
     for code in featured:
         stints = analytics["stints"][code]
         state = _per_lap_state(code, drivers, analytics, total_laps)
-        ai_stops, decisions = _strategise(code, state, stints, total_laps, sc_laps)
+        ai_stops, decisions = _strategise(code, state, stints, total_laps, sc_laps, life_map)
         actual = _actual_stops(stints)
         grade = _grade(actual, ai_stops)
         fpos = final_pos(code)
@@ -261,8 +271,10 @@ def build_engineer(drivers, total_laps, analytics, driver_meta, events):
             "startCompound": stints[0]["compound"],
             "actualStops": actual, "engineerStops": ai_stops, "agreement": grade,
         }
-        verdict = (_llm_verdict(payload) if use_llm else None) \
-            or _templated_verdict(code, actual, ai_stops, grade, fpos)
+        text, prov = _llm_verdict(payload)
+        if prov:
+            provider = provider or prov
+        verdict = text or _templated_verdict(code, actual, ai_stops, grade, fpos)
 
         out.append({
             "code": code,
@@ -279,10 +291,15 @@ def build_engineer(drivers, total_laps, analytics, driver_meta, events):
             "verdict": verdict,
         })
 
+    note = ("Decisions are rule-based (tyre-life + pit-loss + undercut). "
+            "Set GROQ/GEMINI/COHERE keys for LLM-written verdicts.")
+    if life_source == "model-temp":
+        note += f" Tyre life is scaled {life_factor:.2f}x by the pace model's track-temp finding."
     return {
-        "source": "llama" if use_llm else "heuristic",
-        "model": model if use_llm else "Deterministic strategist",
-        "note": "Decisions are rule-based (tyre-life + pit-loss + undercut). "
-                "Set GROQ_API_KEY to add Llama-written verdicts.",
+        "source": provider or "heuristic",
+        "model": provider or "Deterministic strategist",
+        "tyreLifeSource": life_source,
+        "tyreLifeFactor": life_factor,
+        "note": note,
         "drivers": out,
     }

@@ -114,7 +114,9 @@ export default function StrategistTab({ meta }: { meta: Meta }) {
               )}
               {m.source && (
                 <div className="mt-1 text-[10px] text-muted-2">
-                  {m.source === "llama" ? "Llama · grounded" : "Extractive · from facts"}
+                  {m.source === "extractive"
+                    ? "Extractive · from facts"
+                    : `${m.source} · grounded`}
                 </div>
               )}
             </div>

@@ -178,6 +178,7 @@ def main():
         "nSamples": int(len(df)),
         "races": sorted(df["race"].unique().tolist()),
         "metrics": {"mae": round(mae, 3), "r2": round(r2, 3)},
+        "trackTempMean": round(float(df["trackTemp"].mean()), 1),
         "importances": importances,
         "curves": curves,
         "slopes": slopes,
