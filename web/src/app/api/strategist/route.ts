@@ -31,13 +31,19 @@ async function loadFacts(origin: string, year: number, round: number): Promise<F
 async function llmAnswer(
   question: string,
   retrieved: Retrieved[],
+  history: { role: string; text: string }[] = [],
 ): Promise<{ text: string; provider: string } | null> {
   const facts = retrieved.map((r) => `- ${r.fact.text}`).join("\n");
   const system =
     "You are a Formula 1 race strategist. Answer the user's question using ONLY " +
     "the supplied facts. Cite lap numbers and 3-letter driver codes. Keep it to " +
     "2-4 sentences. If the facts don't cover it, say you don't have that data.";
-  const user = `Question: ${question}\n\nFacts:\n${facts}`;
+  const convo = history.length
+    ? "Conversation so far:\n" +
+      history.map((m) => `${m.role === "user" ? "Q" : "A"}: ${m.text}`).join("\n") +
+      "\n\n"
+    : "";
+  const user = `${convo}Question: ${question}\n\nFacts:\n${facts}`;
 
   const groq = process.env.GROQ_API_KEY;
   if (groq) {
@@ -118,7 +124,12 @@ async function llmAnswer(
 }
 
 export async function POST(request: Request) {
-  let payload: { year?: unknown; round?: unknown; question?: unknown };
+  let payload: {
+    year?: unknown;
+    round?: unknown;
+    question?: unknown;
+    history?: unknown;
+  };
   try {
     payload = await request.json();
   } catch {
@@ -130,6 +141,10 @@ export async function POST(request: Request) {
   if (!Number.isInteger(year) || !Number.isInteger(round) || !question.trim()) {
     return Response.json({ error: "year, round and question required" }, { status: 400 });
   }
+  const history = (Array.isArray(payload.history) ? payload.history : [])
+    .filter((m): m is { role: string; text: string } =>
+      !!m && typeof m.text === "string")
+    .slice(-4);
 
   let facts;
   try {
@@ -139,12 +154,19 @@ export async function POST(request: Request) {
     return Response.json({ error: "race not found" }, { status: 404 });
   }
 
-  const retrieved = retrieve(facts, question, 6);
+  // Short follow-ups ("why?", "how?") carry no terms of their own, so retrieve
+  // using the previous question for context — lightweight conversational RAG.
+  const prevUser = [...history].reverse().find((m) => m.role === "user")?.text;
+  const retrieveQuery =
+    question.trim().split(/\s+/).length <= 3 && prevUser
+      ? `${prevUser} ${question}`
+      : question;
+  const retrieved = retrieve(facts, retrieveQuery, 6);
 
   let answer: string;
   let citations: Citation[];
   let source: string;
-  const llm = await llmAnswer(question, retrieved);
+  const llm = await llmAnswer(question, retrieved, history);
   if (llm) {
     answer = llm.text;
     citations = retrieved

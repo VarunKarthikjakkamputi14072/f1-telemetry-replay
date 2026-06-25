@@ -62,6 +62,22 @@ export function buildFacts(data: FactsInput): Fact[] {
       { kind: "driver", driver: order[0][0], label: `${order[0][0]} won` });
   }
 
+  // Retirements / DNFs — who didn't finish, and roughly when (so "what happened
+  // to X" works for a driver who crashed or broke down rather than placed).
+  for (const [code, recs] of Object.entries(laps)) {
+    const done = recs.reduce((m, r) => (r.lap && r.lap > m ? r.lap : m), 0);
+    if (done > 0 && done < meta.totalLaps - 2) {
+      add(
+        `dnf-${code}`,
+        `${nameOf[code] ?? code} (${code}) did not finish the ${meta.race} — out after lap ${done} of ${meta.totalLaps} (retirement or incident).`,
+        [code, nameOf[code] ?? "", "retired", "retire", "dnf", "out", "crash",
+          "crashed", "incident", "accident", "happened", "happen", "stopped",
+          "finish", "result"],
+        { kind: "driver", driver: code, label: `${code} DNF lap ${done}` },
+      );
+    }
+  }
+
   // Strategy: stints + pit laps.
   for (const [code, stints] of Object.entries(analytics.stints)) {
     if (!stints.length) continue;
@@ -205,7 +221,12 @@ export function extractiveAnswer(retrieved: Retrieved[]): {
   citations: Citation[];
 } {
   if (!retrieved.length) {
-    return { answer: "I don't have data on that for this race.", citations: [] };
+    return {
+      answer:
+        "I couldn't find that in this race's data. Try asking about the result, " +
+        "tyre strategy, pit stops, gaps, the fastest lap, retirements or the safety car.",
+      citations: [],
+    };
   }
   const top = retrieved.slice(0, 3);
   const answer = top.map((r) => r.fact.text).join(" ");

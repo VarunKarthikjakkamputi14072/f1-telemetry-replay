@@ -35,7 +35,12 @@ export default function StrategistTab({ meta }: { meta: Meta }) {
       const res = await fetch("/api/strategist", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ year: meta.year, round: meta.round, question }),
+        body: JSON.stringify({
+          year: meta.year,
+          round: meta.round,
+          question,
+          history: msgs.slice(-4).map((m) => ({ role: m.role, text: m.text })),
+        }),
       });
       const data = await res.json();
       setMsgs((m) => [
