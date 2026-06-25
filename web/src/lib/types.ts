@@ -154,11 +154,18 @@ export interface Moment {
   driver?: string;
 }
 
+export interface Incident {
+  lap: number | null;
+  driver: string | null;
+  msg: string;
+}
+
 export interface Events {
   raceEnd: number;
   trackStatus: StatusBand[];
   weather: WeatherSample[];
   moments: Moment[];
+  incidents?: Incident[];
 }
 
 export interface PitStop {

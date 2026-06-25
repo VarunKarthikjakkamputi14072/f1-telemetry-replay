@@ -1,7 +1,7 @@
 """
-LLM waterfall: Groq (Llama) -> Gemini -> Cohere, first one with a key wins, and
-any failure falls through to the next. Mirrors the VaultMind provider waterfall.
-Returns (text, provider) or (None, None) when nothing is configured/working.
+LLM waterfall: NVIDIA NIM -> Groq (Llama) -> Gemini -> Cohere, first one with a
+key wins, and any failure falls through to the next. Mirrors the VaultMind
+provider waterfall. Returns (text, provider) or (None, None) when nothing works.
 """
 from __future__ import annotations
 
@@ -14,6 +14,20 @@ def _post(url: str, headers: dict, body: dict, timeout: int = 30) -> dict:
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
+
+
+def _nim(prompt, mt, temp):
+    key = os.environ.get("NVIDIA_API_KEY")
+    if not key:
+        return None
+    model = os.environ.get("NIM_MODEL", "meta/llama-3.3-70b-instruct")
+    d = _post(
+        "https://integrate.api.nvidia.com/v1/chat/completions",
+        {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        {"model": model, "messages": [{"role": "user", "content": prompt}],
+         "temperature": temp, "max_tokens": mt},
+    )
+    return d["choices"][0]["message"]["content"].strip(), f"nim:{model.split('/')[-1]}"
 
 
 def _groq(prompt, mt, temp):
@@ -59,7 +73,7 @@ def _cohere(prompt, mt, temp):
 
 
 def complete(prompt: str, max_tokens: int = 200, temperature: float = 0.4):
-    for provider in (_groq, _gemini, _cohere):
+    for provider in (_nim, _groq, _gemini, _cohere):
         try:
             out = provider(prompt, max_tokens, temperature)
             if out and out[0]:

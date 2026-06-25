@@ -66,9 +66,10 @@ export default function StrategistTab({ meta }: { meta: Meta }) {
         <span className="text-xs text-muted-2">grounded in this race&apos;s data</span>
       </div>
       <p className="mb-3 text-sm text-muted-2">
-        Questions are answered by retrieving facts from the race telemetry, with
-        citations. Set <code className="rounded bg-panel-2 px-1">GROQ_API_KEY</code>{" "}
-        for Llama-written answers; otherwise replies are extractive.
+        Set <code className="rounded bg-panel-2 px-1">NVIDIA_API_KEY</code> (NIM)
+        in <code className="rounded bg-panel-2 px-1">web/.env.local</code> and the
+        model reasons over the whole race — penalties, incidents, anything. Without
+        a key, replies fall back to extractive fact lookup.
       </p>
 
       <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">

@@ -3,8 +3,8 @@ import {
   extractiveAnswer,
   retrieve,
   type Citation,
+  type Fact,
   type FactsInput,
-  type Retrieved,
 } from "@/lib/strategist";
 
 export const runtime = "nodejs";
@@ -30,20 +30,49 @@ async function loadFacts(origin: string, year: number, round: number): Promise<F
 // configured/working so the caller falls back to the extractive answer.
 async function llmAnswer(
   question: string,
-  retrieved: Retrieved[],
+  contextFacts: Fact[],
   history: { role: string; text: string }[] = [],
 ): Promise<{ text: string; provider: string } | null> {
-  const facts = retrieved.map((r) => `- ${r.fact.text}`).join("\n");
+  // Give the model the whole race's facts (capped) so it can reason about
+  // anything — penalties, incidents, who pitted most — not just a few cards.
+  const facts = contextFacts.slice(0, 140).map((f) => `- ${f.text}`).join("\n");
   const system =
-    "You are a Formula 1 race strategist. Answer the user's question using ONLY " +
-    "the supplied facts. Cite lap numbers and 3-letter driver codes. Keep it to " +
-    "2-4 sentences. If the facts don't cover it, say you don't have that data.";
+    "You are an expert Formula 1 race analyst. Answer the user's question using " +
+    "ONLY the supplied facts about this one race. Cite lap numbers and 3-letter " +
+    "driver codes. Be specific and concise (2-5 sentences). If the facts genuinely " +
+    "don't cover it, say so briefly.";
   const convo = history.length
     ? "Conversation so far:\n" +
       history.map((m) => `${m.role === "user" ? "Q" : "A"}: ${m.text}`).join("\n") +
       "\n\n"
     : "";
-  const user = `${convo}Question: ${question}\n\nFacts:\n${facts}`;
+  const user = `${convo}Question: ${question}\n\nFacts about this race:\n${facts}`;
+
+  // 1) NVIDIA NIM (OpenAI-compatible) — primary.
+  const nim = process.env.NVIDIA_API_KEY;
+  if (nim) {
+    try {
+      const model = process.env.NIM_MODEL ?? "meta/llama-3.3-70b-instruct";
+      const res = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${nim}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model, temperature: 0.3, max_tokens: 320,
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: user },
+          ],
+        }),
+      });
+      if (res.ok) {
+        const d = await res.json();
+        const text = d.choices?.[0]?.message?.content?.trim();
+        if (text) return { text, provider: `nim:${model.split("/").pop()}` };
+      }
+    } catch {
+      /* fall through */
+    }
+  }
 
   const groq = process.env.GROQ_API_KEY;
   if (groq) {
@@ -166,7 +195,8 @@ export async function POST(request: Request) {
   let answer: string;
   let citations: Citation[];
   let source: string;
-  const llm = await llmAnswer(question, retrieved, history);
+  // LLM reasons over the whole race; retrieval drives citations + the fallback.
+  const llm = await llmAnswer(question, facts, history);
   if (llm) {
     answer = llm.text;
     citations = retrieved

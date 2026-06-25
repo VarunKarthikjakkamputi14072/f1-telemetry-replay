@@ -363,6 +363,30 @@ def build_events(session, drivers):
     except Exception:
         pass
 
+    # --- Race-control incidents & penalties (so the strategist can answer
+    #     "what happened", "penalties imposed", "who was investigated", etc.) ---
+    incidents = []
+    try:
+        num2code = {str(d["num"]): code for code, d in drivers.items()}
+        keywords = ("PENALTY", "INVESTIGAT", "INCIDENT", "NOTED", "COLLISION",
+                    "REPRIMAND", "WARNING", "DRIVE THROUGH", "DISQUALIF", "GRID")
+        for _, m in session.race_control_messages.iterrows():
+            msg = str(m.get("Message", "")).strip()
+            cat = str(m.get("Category", ""))
+            up = msg.upper()
+            if not (cat == "CarEvent" or any(k in up for k in keywords)):
+                continue
+            if "DELETED" in up:  # track-limits lap deletions: too noisy
+                continue
+            num = m.get("RacingNumber")
+            incidents.append({
+                "lap": int(m["Lap"]) if pd.notna(m.get("Lap")) else None,
+                "driver": num2code.get(str(int(num))) if pd.notna(num) else None,
+                "msg": msg,
+            })
+    except Exception:
+        pass
+
     # --- Key moments ---
     # Race start aligns with the start of telemetry (the seek bar's left edge).
     t_start = min((float(d["t"][0]) for d in drivers.values() if len(d["t"])),
@@ -411,7 +435,7 @@ def build_events(session, drivers):
 
     moments.sort(key=lambda m: m["t"])
     return {"raceEnd": round(race_end, 1), "trackStatus": status_bands,
-            "weather": weather, "moments": moments}
+            "weather": weather, "moments": moments, "incidents": incidents}
 
 
 def build_analytics(drivers):

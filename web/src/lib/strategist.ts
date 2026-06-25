@@ -134,6 +134,23 @@ export function buildFacts(data: FactsInput): Fact[] {
       { kind: "lap", lap, label: `Lap ${lap} gaps` });
   }
 
+  // Race-control incidents, penalties and investigations.
+  for (const inc of events.incidents ?? []) {
+    const drv = inc.driver ? [inc.driver] : [];
+    const tags = [
+      ...drv, "incident", "penalty", "penalties", "investigation", "investigated",
+      "collision", "crash", "happened", "stewards", "noted", "what",
+    ];
+    add(
+      `incident-${facts.length}`,
+      inc.lap ? `Lap ${inc.lap}: ${inc.msg}` : inc.msg,
+      tags,
+      inc.lap
+        ? { kind: "lap", lap: inc.lap, driver: inc.driver ?? undefined, label: `Lap ${inc.lap}` }
+        : { kind: "event", label: "Race control" },
+    );
+  }
+
   // Race control moments.
   for (const m of events.moments) {
     if (m.type === "sc" || m.type === "vsc" || m.type === "red") {
