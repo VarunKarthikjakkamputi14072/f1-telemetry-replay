@@ -37,10 +37,17 @@ async function llmAnswer(
   // anything — penalties, incidents, who pitted most — not just a few cards.
   const facts = contextFacts.slice(0, 140).map((f) => `- ${f.text}`).join("\n");
   const system =
-    "You are an expert Formula 1 race analyst. Answer the user's question using " +
-    "ONLY the supplied facts about this one race. Cite lap numbers and 3-letter " +
-    "driver codes. Be specific and concise (2-5 sentences). If the facts genuinely " +
-    "don't cover it, say so briefly.";
+    "You are a sharp, friendly Formula 1 expert having an ongoing conversation " +
+    "with a fan. The supplied facts are the GROUND TRUTH for THIS race: rely on " +
+    "them for anything about this race, cite lap numbers and 3-letter driver " +
+    "codes, and never invent race-specific details that aren't in them. " +
+    "For broader questions — a driver's career, championships, records, history, " +
+    "the greatest of an era, comparisons — draw on your own knowledge of Formula 1 " +
+    "and answer naturally; do NOT refuse just because it's outside this race, and " +
+    "feel free to connect it back to what happened here. Build on the earlier " +
+    "messages so the chat flows. Be accurate and engaging; if you're genuinely " +
+    "unsure, or your knowledge may be out of date for very recent seasons, say so " +
+    "briefly. Keep answers to a few sentences unless more detail is clearly wanted.";
   const convo = history.length
     ? "Conversation so far:\n" +
       history.map((m) => `${m.role === "user" ? "Q" : "A"}: ${m.text}`).join("\n") +
@@ -57,7 +64,7 @@ async function llmAnswer(
         method: "POST",
         headers: { Authorization: `Bearer ${nim}`, "Content-Type": "application/json" },
         body: JSON.stringify({
-          model, temperature: 0.3, max_tokens: 320,
+          model, temperature: 0.4, max_tokens: 450,
           messages: [
             { role: "system", content: system },
             { role: "user", content: user },
