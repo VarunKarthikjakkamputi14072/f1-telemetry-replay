@@ -49,7 +49,9 @@ def _stint_time(compound, n_laps, start_lap, total, base, deg, fuel_k):
     age = laps + 1
     lap_no = start_lap + laps
     life = TYRE_LIFE.get(compound, 30)
-    cliff = CLIFF * np.maximum(0, age - life) ** 2  # tyres "fall off" past their life
+    # Tyres "fall off" past their life; cap so a freak long stint (e.g. a
+    # red-flag race) doesn't blow up to an absurd time.
+    cliff = np.minimum(CLIFF * np.maximum(0, age - life) ** 2, 4.0)
     pace = (base + COMPOUND_OFFSET.get(compound, 0.0) + deg.get(compound, 0.05) * age
             + cliff + fuel_k * (total - lap_no) / total)
     return float(pace.sum())
@@ -148,8 +150,11 @@ def simulate_race(d):
         if wstints and all(s["compound"] in DRY for s in wstints):
             strat = [(s["compound"], s["lapStart"], s["lapEnd"]) for s in wstints]
             wm, _, _, wn = _simulate(strat, total, base, deg, fuel_k)
-            winner = {"code": wc, "stints": _describe(strat), "stops": wn,
-                      "meanTime": round(wm, 1), "deltaToOptimal": round(wm - best_mean, 1)}
+            delta = wm - best_mean
+            # Skip anomalous races (e.g. red-flagged) the clear-air sim can't model.
+            if delta <= 120:
+                winner = {"code": wc, "stints": _describe(strat), "stops": wn,
+                          "meanTime": round(wm, 1), "deltaToOptimal": round(delta, 1)}
 
     out = {
         "totalLaps": total, "nSims": N_SIMS, "baseLap": round(base, 2),
