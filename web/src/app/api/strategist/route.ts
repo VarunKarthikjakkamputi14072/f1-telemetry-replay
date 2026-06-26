@@ -9,6 +9,43 @@ import {
 
 export const runtime = "nodejs";
 
+// Driver name -> Wikipedia title, so questions about a driver's career or what
+// they're doing *now* are grounded in live, current info rather than the model's
+// stale training data. Keyless (Wikipedia REST). Add names as needed.
+const DRIVER_WIKI: Record<string, string> = {
+  hamilton: "Lewis_Hamilton", verstappen: "Max_Verstappen",
+  leclerc: "Charles_Leclerc", norris: "Lando_Norris", russell: "George_Russell",
+  sainz: "Carlos_Sainz_Jr.", perez: "Sergio_Pérez", alonso: "Fernando_Alonso",
+  vettel: "Sebastian_Vettel", schumacher: "Michael_Schumacher",
+  senna: "Ayrton_Senna", prost: "Alain_Prost", piastri: "Oscar_Piastri",
+  gasly: "Pierre_Gasly", ocon: "Esteban_Ocon", stroll: "Lance_Stroll",
+  tsunoda: "Yuki_Tsunoda", bottas: "Valtteri_Bottas", ricciardo: "Daniel_Ricciardo",
+  hulkenberg: "Nico_Hülkenberg", albon: "Alexander_Albon", raikkonen: "Kimi_Räikkönen",
+  rosberg: "Nico_Rosberg", button: "Jenson_Button", massa: "Felipe_Massa",
+  webber: "Mark_Webber", antonelli: "Andrea_Kimi_Antonelli", colapinto: "Franco_Colapinto",
+};
+
+// Fetch a 1-paragraph Wikipedia summary for the first driver mentioned. Returns
+// "" on miss/failure (best-effort live knowledge).
+async function wikiBackground(text: string): Promise<string> {
+  const q = text.toLowerCase();
+  const title = Object.entries(DRIVER_WIKI).find(([k]) =>
+    new RegExp(`\\b${k}\\b`).test(q),
+  )?.[1];
+  if (!title) return "";
+  try {
+    const res = await fetch(
+      `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`,
+      { headers: { "User-Agent": "apex-f1/1.0" } },
+    );
+    if (!res.ok) return "";
+    const d = await res.json();
+    return typeof d.extract === "string" ? d.extract : "";
+  } catch {
+    return "";
+  }
+}
+
 // Load just the files the strategist needs from the deployment's own static
 // assets — robust on Vercel (no fs tracing) and in local dev alike.
 async function loadFacts(origin: string, year: number, round: number): Promise<FactsInput> {
@@ -45,9 +82,15 @@ async function llmAnswer(
     "the greatest of an era, comparisons — draw on your own knowledge of Formula 1 " +
     "and answer naturally; do NOT refuse just because it's outside this race, and " +
     "feel free to connect it back to what happened here. Build on the earlier " +
-    "messages so the chat flows. Be accurate and engaging; if you're genuinely " +
-    "unsure, or your knowledge may be out of date for very recent seasons, say so " +
-    "briefly. Keep answers to a few sentences unless more detail is clearly wanted.";
+    "messages so the chat flows. " +
+    "CRITICAL — accuracy over agreeableness: you have a training cutoff and NO live " +
+    "data. Do NOT state current-day facts you can't be sure of — a driver's CURRENT " +
+    "team, the latest/ongoing season, recent transfers or standings are beyond your " +
+    "reliable knowledge. For those, say plainly that you don't have live information " +
+    "and can only speak to this race and well-established history. Never just agree " +
+    "with the user's claim to be polite — if you can't verify it, say so. It is " +
+    "better to admit a limit than to guess. Keep answers to a few sentences unless " +
+    "more detail is clearly wanted.";
   const convo = history.length
     ? "Conversation so far:\n" +
       history.map((m) => `${m.role === "user" ? "Q" : "A"}: ${m.text}`).join("\n") +
