@@ -8,10 +8,11 @@ import { fmtLapTime } from "./format";
 // citation back to a lap / driver / event.
 
 export interface Citation {
-  kind: "lap" | "driver" | "event";
+  kind: "lap" | "driver" | "event" | "web";
   label: string;
   lap?: number;
   driver?: string;
+  url?: string;
 }
 
 export interface Fact {

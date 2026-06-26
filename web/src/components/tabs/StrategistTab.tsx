@@ -99,7 +99,17 @@ export default function StrategistTab({ meta }: { meta: Meta }) {
               {m.citations && m.citations.length > 0 && (
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   {m.citations.map((c, j) =>
-                    c.kind === "driver" && c.driver ? (
+                    c.kind === "web" && c.url ? (
+                      <a
+                        key={j}
+                        href={c.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="rounded border border-border bg-bg-elev px-1.5 py-0.5 text-[10px] text-[#4aa3ff] transition hover:underline"
+                      >
+                        🌐 {c.label} ↗
+                      </a>
+                    ) : c.kind === "driver" && c.driver ? (
                       <Link
                         key={j}
                         href={`/race/${meta.year}/${meta.round}/driver/${c.driver}`}

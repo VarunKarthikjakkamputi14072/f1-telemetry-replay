@@ -6,45 +6,13 @@ import {
   type Fact,
   type FactsInput,
 } from "@/lib/strategist";
+import { searchWeb, type WebResult } from "@/lib/webSearch";
+
+// Questions that reach beyond this one race — answered with live web results.
+const GENERAL_RE =
+  /\b(now|current|currently|today|latest|recent|this season|next season|20(2[3-9]|[3-9]\d)|transfer|moved|signed|contract|retire|retired|career|all[- ]?time|greatest|best of|legacy|champion|championship|titles?|record|standings|who is|where is|history|compare|versus|\bvs\b)\b/i;
 
 export const runtime = "nodejs";
-
-// Driver name -> Wikipedia title, so questions about a driver's career or what
-// they're doing *now* are grounded in live, current info rather than the model's
-// stale training data. Keyless (Wikipedia REST). Add names as needed.
-const DRIVER_WIKI: Record<string, string> = {
-  hamilton: "Lewis_Hamilton", verstappen: "Max_Verstappen",
-  leclerc: "Charles_Leclerc", norris: "Lando_Norris", russell: "George_Russell",
-  sainz: "Carlos_Sainz_Jr.", perez: "Sergio_Pérez", alonso: "Fernando_Alonso",
-  vettel: "Sebastian_Vettel", schumacher: "Michael_Schumacher",
-  senna: "Ayrton_Senna", prost: "Alain_Prost", piastri: "Oscar_Piastri",
-  gasly: "Pierre_Gasly", ocon: "Esteban_Ocon", stroll: "Lance_Stroll",
-  tsunoda: "Yuki_Tsunoda", bottas: "Valtteri_Bottas", ricciardo: "Daniel_Ricciardo",
-  hulkenberg: "Nico_Hülkenberg", albon: "Alexander_Albon", raikkonen: "Kimi_Räikkönen",
-  rosberg: "Nico_Rosberg", button: "Jenson_Button", massa: "Felipe_Massa",
-  webber: "Mark_Webber", antonelli: "Andrea_Kimi_Antonelli", colapinto: "Franco_Colapinto",
-};
-
-// Fetch a 1-paragraph Wikipedia summary for the first driver mentioned. Returns
-// "" on miss/failure (best-effort live knowledge).
-async function wikiBackground(text: string): Promise<string> {
-  const q = text.toLowerCase();
-  const title = Object.entries(DRIVER_WIKI).find(([k]) =>
-    new RegExp(`\\b${k}\\b`).test(q),
-  )?.[1];
-  if (!title) return "";
-  try {
-    const res = await fetch(
-      `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`,
-      { headers: { "User-Agent": "apex-f1/1.0" } },
-    );
-    if (!res.ok) return "";
-    const d = await res.json();
-    return typeof d.extract === "string" ? d.extract : "";
-  } catch {
-    return "";
-  }
-}
 
 // Load just the files the strategist needs from the deployment's own static
 // assets — robust on Vercel (no fs tracing) and in local dev alike.
@@ -69,10 +37,16 @@ async function llmAnswer(
   question: string,
   contextFacts: Fact[],
   history: { role: string; text: string }[] = [],
+  web: WebResult[] = [],
 ): Promise<{ text: string; provider: string } | null> {
   // Give the model the whole race's facts (capped) so it can reason about
   // anything — penalties, incidents, who pitted most — not just a few cards.
   const facts = contextFacts.slice(0, 140).map((f) => `- ${f.text}`).join("\n");
+  const webBlock = web.length
+    ? "\n\nLive web results (current/general info — prefer these for anything beyond " +
+      "this race; cite the source):\n" +
+      web.map((w, i) => `[${i + 1}] ${w.title}: ${w.snippet} (${w.url})`).join("\n")
+    : "";
   const system =
     "You are a sharp, friendly Formula 1 expert having an ongoing conversation " +
     "with a fan. The supplied facts are the GROUND TRUTH for THIS race: rely on " +
@@ -83,20 +57,21 @@ async function llmAnswer(
     "and answer naturally; do NOT refuse just because it's outside this race, and " +
     "feel free to connect it back to what happened here. Build on the earlier " +
     "messages so the chat flows. " +
-    "CRITICAL — accuracy over agreeableness: you have a training cutoff and NO live " +
-    "data. Do NOT state current-day facts you can't be sure of — a driver's CURRENT " +
-    "team, the latest/ongoing season, recent transfers or standings are beyond your " +
-    "reliable knowledge. For those, say plainly that you don't have live information " +
-    "and can only speak to this race and well-established history. Never just agree " +
-    "with the user's claim to be polite — if you can't verify it, say so. It is " +
-    "better to admit a limit than to guess. Keep answers to a few sentences unless " +
-    "more detail is clearly wanted.";
+    "CRITICAL — be accurate, not merely agreeable. For anything about THIS race, use " +
+    "only the supplied race facts and never invent laps, penalties or results. For " +
+    "current or recent real-world facts (a driver's CURRENT team, the latest season, " +
+    "transfers, standings, records): if 'Live web results' are included below, treat " +
+    "them as up to date and answer confidently, citing them like [1]; if NO web " +
+    "results are given, say plainly you don't have live data rather than guessing or " +
+    "relying on possibly-stale training. Don't just agree with the user's claim " +
+    "unless the race facts or web results actually support it. Keep answers to a few " +
+    "sentences unless more detail is clearly wanted.";
   const convo = history.length
     ? "Conversation so far:\n" +
       history.map((m) => `${m.role === "user" ? "Q" : "A"}: ${m.text}`).join("\n") +
       "\n\n"
     : "";
-  const user = `${convo}Question: ${question}\n\nFacts about this race:\n${facts}`;
+  const user = `${convo}Question: ${question}\n\nFacts about this race:\n${facts}${webBlock}`;
 
   // 1) NVIDIA NIM (OpenAI-compatible) — primary.
   const nim = process.env.NVIDIA_API_KEY;
@@ -242,18 +217,25 @@ export async function POST(request: Request) {
       : question;
   const retrieved = retrieve(facts, retrieveQuery, 6);
 
+  // For questions that reach beyond this race, pull live web results so the
+  // model answers from real current sources instead of stale guesses.
+  const web = GENERAL_RE.test(question) ? await searchWeb(retrieveQuery) : [];
+
   let answer: string;
   let citations: Citation[];
   let source: string;
-  // LLM reasons over the whole race; retrieval drives citations + the fallback.
-  const llm = await llmAnswer(question, facts, history);
+  // LLM reasons over the whole race + web; retrieval drives race citations.
+  const llm = await llmAnswer(question, facts, history, web);
   if (llm) {
     answer = llm.text;
     citations = retrieved
-      .slice(0, 4)
+      .slice(0, 3)
       .map((r) => r.fact.cite)
       .filter((c): c is Citation => !!c);
-    source = llm.provider;
+    for (const w of web.slice(0, 3)) {
+      citations.push({ kind: "web", label: w.title.slice(0, 40), url: w.url });
+    }
+    source = web.length ? `${llm.provider} + web` : llm.provider;
   } else {
     ({ answer, citations } = extractiveAnswer(retrieved));
     source = "extractive";
