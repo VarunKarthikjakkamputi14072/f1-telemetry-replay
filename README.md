@@ -1,28 +1,81 @@
 # Apex — F1 Telemetry Replay & Analytics
 
+**A 90-minute Grand Prix of 20 cars' telemetry is gigabytes of data a browser
+can't fetch or compute on — Apex moves the expensive, correctness-sensitive
+work into an offline pipeline so the browser only ever renders.**
+
 A broadcast-style Formula 1 race replay and analytics studio built on real
-[FastF1](https://docs.fastf1.dev/) telemetry. Scrub through a Grand Prix with a
-live timing tower, then dig into tyre strategy, the race's position-change
-story, and distance-aligned driver-vs-driver telemetry.
-
-The project has two halves:
-
-- **`web/`** — a Next.js app: a 60 fps `<canvas>` replay plus a Recharts
-  analytics dashboard (this is the headline).
-- **`pipeline/`** — a Python exporter that does the heavy, browser-unfriendly
-  data work once and emits compact JSON for the web app to read.
-- **`src/`** — the original desktop replay (pygame) the project grew out of,
-  kept working.
+[FastF1](https://docs.fastf1.dev/) telemetry. Scrub through a race with a live
+timing tower, then dig into tyre strategy, the position-change story, and
+distance-aligned driver-vs-driver telemetry.
 
 ---
 
-## Why it's built this way
+## Architecture
 
-Browsers can't run FastF1, and a 90-minute race of 20 cars' telemetry is far too
-much to ship raw. So all the expensive and *correctness-sensitive* work happens
-in the Python pipeline, and the front-end consumes precomputed, quantized JSON.
+```mermaid
+flowchart LR
+    f1[("FastF1<br/>official timing + telemetry")] --> pipe
 
-The interesting part is getting the racing maths right rather than eyeballed:
+    subgraph pipe["pipeline/ — Python, offline, run once per race"]
+      direction TB
+      resample["resample all cars<br/>onto one session clock"] --> gaps["derive real time gaps<br/>+ official positions"]
+      gaps --> track["racing line, corners,<br/>start/finish from fastest lap"]
+      track --> quant["quantize to ints,<br/>slice to active windows"]
+    end
+
+    pipe -- "~7 MB JSON per race<br/>committed to the repo" --> data[("web/public/data/<br/>year/round/")]
+
+    data --> web
+    subgraph web["web/ — Next.js, browser, render only"]
+      direction TB
+      canvas["60 fps canvas replay<br/>timing tower · onboard cam"]
+      charts["Recharts analytics<br/>strategy · pace · compare"]
+      strat["AI Engineer + RAG chat<br/>BM25-lite, no vector DB"]
+    end
+
+    data --> model["tyre & pace model<br/>gradient-boosted regressor"]
+    model --> strat
+
+    classDef store fill:#fff3cd,stroke:#d39e00,color:#333;
+    classDef svc fill:#d4edda,stroke:#28a745,color:#333;
+    class f1,data store;
+    class resample,gaps,track,quant,canvas,charts,strat,model svc;
+```
+
+`src/` holds the original pygame desktop replay the project grew out of, still working.
+
+---
+
+## The key design decision: precompute everything, ship JSON
+
+**The alternative I rejected:** a live API the front-end queries per frame —
+fetch telemetry on demand, compute gaps and positions server-side as the user
+scrubs.
+
+**Why it loses:** FastF1 can't run in a browser, so the choice is really *where*
+the computation lives, and a per-frame server round-trip is fatal for a 60 fps
+scrub. Worse, gap computation isn't a per-frame operation at all — deriving a
+true time gap requires knowing when the car *ahead* passed the position the car
+behind now occupies, which needs the whole session resampled onto one clock.
+Doing that per request means recomputing a race-wide structure on every frame,
+and adds a server that must stay running for a fundamentally static artifact.
+
+**What Apex does instead:** the pipeline does the race-wide work once, quantizes
+to integers, slices each driver's data to their active window, and emits JSON.
+The front-end is a pure renderer over static files, so the deployed site is
+static hosting with no backend, and scrubbing is instant because every frame is
+already in memory.
+
+**What it costs, honestly:** race data is baked at export time, so adding a race
+means re-running the pipeline and redeploying — there's no live/in-progress race
+support, and a pipeline bug means re-exporting everything. The JSON is also
+committed to the repo, which is why it carries ~130 MB. For a finished-race
+archive that's the right trade; for live timing it would be the wrong one.
+
+### Getting the racing maths right
+
+The precompute is only worth it if the numbers are correct rather than eyeballed:
 
 | Concern | Naive approach | What this does |
 | --- | --- | --- |
@@ -31,8 +84,62 @@ The interesting part is getting the racing maths right rather than eyeballed:
 | **The track** | hard-coded outline | Racing line + corner numbers + start/finish taken from the session's fastest lap and `circuit_info`. |
 | **Lap comparison** | overlay vs time | Distance-aligned delta time: integrate `dx / v(x)` along the lap so the two cars are compared at the same point on track. |
 
-Everything is quantized to integers and sliced to each driver's active window,
-so a full race exports to **~5 MB** of JSON.
+---
+
+## Measured result
+
+Measured **2026-08-05**.
+
+**The compression the precompute buys** — across the 19 races committed to the repo:
+
+| Metric | Result |
+|---|---|
+| Races exported | **19** |
+| JSON per race | **5–9 MB** (median 7 MB) |
+| Total committed data | 130 MB |
+
+Each race is a full session of 20 cars' telemetry, quantized to integers and
+sliced to each driver's active window. Verify with `du -sh web/public/data/*/*`.
+
+**The grounded-chat eval** — `npm run eval:strategist` scores the RAG strategist
+against hand-labelled questions per race, RAGAS-style:
+
+```
+2019 r11  (5 Qs)  recall@6 100%  accuracy 100%  faithfulness 1.00
+2021 r22  (5 Qs)  recall@6 100%  accuracy 100%  faithfulness 1.00
+2022 r13  (5 Qs)  recall@6 100%  accuracy 100%  faithfulness 1.00
+2023 r20  (5 Qs)  recall@6 100%  accuracy 100%  faithfulness 1.00
+2024 r21  (5 Qs)  recall@6 100%  accuracy 100%  faithfulness 1.00
+
+OVERALL   recall@6 100%  accuracy 100%  faithfulness 1.00  (n=25)
+```
+
+**Honest caveat:** n=25 is a small, hand-written question set, and a perfect score
+across every metric means the questions sit comfortably inside what the retriever
+handles — it demonstrates the fact-card retrieval and citation plumbing work end
+to end, not that the system is robust to adversarial questions. A larger and
+deliberately harder set is the next step.
+
+**Strategy-engine sanity check:** on 2021 Abu Dhabi the AI Engineer independently
+reproduces Verstappen's three stops, including the lap-54 switch to softs,
+without being told the actual strategy.
+
+---
+
+## Run it in under 2 minutes
+
+The exported race data is **committed to the repo**, so no Python and no
+telemetry download are needed to see the app:
+
+```bash
+cd web
+npm install
+npm run dev        # http://localhost:3000
+```
+
+The landing page lists all 19 exported races. Any moment is shareable — the
+**Share** button copies a deep link restoring the exact tab, time, focused driver
+and camera (e.g. `/race/2021/22?t=4860&d=VER&cam=1`).
 
 ---
 
@@ -75,9 +182,9 @@ so a full race exports to **~5 MB** of JSON.
 
 ---
 
-## Running it
+## Exporting more races
 
-### 1. Export a race (Python)
+The 19 committed races cover the quick start; the pipeline adds any other:
 
 ```bash
 python -m venv venv && source venv/bin/activate
@@ -85,26 +192,11 @@ pip install -r requirements.txt
 
 # Downloads telemetry (cached after first run) and writes web/public/data/<year>/<round>/
 python -m pipeline.export --year 2021 --race "Abu Dhabi"
-# any race works:
 python -m pipeline.export --year 2023 --race "Brazil"
 
 # optional: AI Engineer verdicts written by Llama (Groq free tier)
 export GROQ_API_KEY=...   # then re-run the export above
 ```
-
-### 2. Run the web app
-
-```bash
-cd web
-npm install
-npm run dev        # http://localhost:3000
-```
-
-The landing page lists every race you've exported.
-
-Any moment is shareable: the **Share** button copies a deep link that restores
-the exact tab, time, focused driver and onboard camera (e.g.
-`/race/2021/22?t=4860&d=VER&cam=1`).
 
 ### Desktop replay (original)
 
